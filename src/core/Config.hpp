@@ -106,6 +106,11 @@ namespace Core {
                     Logger::Info("已加载目标进程列表, 共 " + std::to_string(targetProcesses.size()) + " 项");
                 }
 
+                Logger::Info("配置: proxy=" + proxy.host + ":" + std::to_string(proxy.port) +
+                             " type=" + proxy.type +
+                             ", fake_ip=" + std::string(fakeIp.enabled ? "true" : "false") +
+                             ", child_injection=" + std::string(childInjection ? "true" : "false") +
+                             ", traffic_logging=" + std::string(trafficLogging ? "true" : "false"));
                 Logger::Info("Config loaded successfully.");
                 return true;
             } catch (const std::exception& e) {

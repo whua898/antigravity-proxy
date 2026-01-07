@@ -1,25 +1,29 @@
 {
-  "_build": {
-    "config": "Release",
-    "arch": "x64",
-    "date": "2026-01-07 22:18:45"
-  },
+  "_comment": "Antigravity-Proxy 配置文件",
+  "_version": "1.1.0",
+  "target_processes": [
+    "language_server_windows",
+    "Antigravity.exe"
+  ],
+  "traffic_logging": false,
   "timeout": {
     "send": 5000,
     "recv": 5000,
     "connect": 5000
   },
-  "traffic_logging": false,
   "child_injection": true,
-  "_comment": "Antigravity-Proxy 配置文件",
+  "_build": {
+    "config": "Release",
+    "arch": "x64",
+    "date": "2026-01-08 01:42:30"
+  },
+  "fake_ip": {
+    "cidr": "10.0.0.0/8",
+    "enabled": true
+  },
   "proxy": {
     "host": "127.0.0.1",
     "type": "socks5",
     "port": 7890
-  },
-  "fake_ip": {
-    "enabled": true,
-    "cidr": "10.0.0.0/8"
-  },
-  "_version": "1.0.0"
+  }
 }
