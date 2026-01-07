@@ -2,11 +2,12 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <string>
+#include <vector>
 #include "../core/Logger.hpp"
 
 namespace Network {
     
-    // SOCKS5 协议常量
+    // SOCKS5 Protocol Constants
     namespace Socks5 {
         constexpr uint8_t VERSION = 0x05;
         constexpr uint8_t AUTH_NONE = 0x00;
@@ -18,11 +19,25 @@ namespace Network {
     }
     
     class Socks5Client {
+    private:
+        // Helper to ensure exact number of bytes are read (handles TCP fragmentation)
+        static bool ReadExact(SOCKET sock, uint8_t* buf, int len) {
+            int totalRead = 0;
+            while (totalRead < len) {
+                int result = recv(sock, (char*)(buf + totalRead), len - totalRead, 0);
+                if (result <= 0) {
+                    return false;
+                }
+                totalRead += result;
+            }
+            return true;
+        }
+
     public:
-        // 执行 SOCKS5 握手 (无认证模式)
-        // 返回 true 表示成功建立隧道
+        // Execute SOCKS5 Handshake (No Auth)
+        // Returns true if tunnel is established
         static bool Handshake(SOCKET sock, const std::string& targetHost, uint16_t targetPort) {
-            // 第一步：发送认证方法协商
+            // 1. Auth Method Negotiation
             // +----+----------+----------+
             // |VER | NMETHODS | METHODS  |
             // +----+----------+----------+
@@ -34,76 +49,110 @@ namespace Network {
                 return false;
             }
             
-            // 接收认证方法响应
+            // Receive Auth Method Response
             uint8_t authResponse[2];
-            int recvResult = recv(sock, (char*)authResponse, 2, 0);
-            if (recvResult != 2) {
-                int wsaErr = WSAGetLastError();
-                Core::Logger::Error("SOCKS5: Failed to receive auth response, recv=" + 
-                    std::to_string(recvResult) + ", WSAError=" + std::to_string(wsaErr));
+            if (!ReadExact(sock, authResponse, 2)) {
+                Core::Logger::Error("SOCKS5: Failed to read auth response");
                 return false;
             }
             
             if (authResponse[0] != Socks5::VERSION || authResponse[1] != Socks5::AUTH_NONE) {
-                Core::Logger::Error("SOCKS5: Auth method not supported, version=" + 
-                    std::to_string(authResponse[0]) + ", method=" + std::to_string(authResponse[1]));
+                Core::Logger::Error("SOCKS5: Auth not supported. Ver=" + 
+                    std::to_string(authResponse[0]) + ", Method=" + std::to_string(authResponse[1]));
                 return false;
             }
             
-            // 第二步：发送连接请求
+            // 2. Send Connect Request
             // +----+-----+-------+------+----------+----------+
             // |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
             // +----+-----+-------+------+----------+----------+
-            // | 1  |  1  | X'00' |  1   | Variable |    2     |
-            // +----+-----+-------+------+----------+----------+
+            std::vector<uint8_t> request;
+            request.push_back(Socks5::VERSION);
+            request.push_back(Socks5::CMD_CONNECT);
+            request.push_back(0x00); // RSV
             
-            std::vector<uint8_t> connectRequest;
-            connectRequest.push_back(Socks5::VERSION);
-            connectRequest.push_back(Socks5::CMD_CONNECT);
-            connectRequest.push_back(0x00); // RSV
-            
-            // 判断目标是 IP 还是域名
             in_addr addr;
             if (inet_pton(AF_INET, targetHost.c_str(), &addr) == 1) {
-                // IPv4 地址
-                connectRequest.push_back(Socks5::ATYP_IPV4);
-                connectRequest.push_back((addr.s_addr >> 0) & 0xFF);
-                connectRequest.push_back((addr.s_addr >> 8) & 0xFF);
-                connectRequest.push_back((addr.s_addr >> 16) & 0xFF);
-                connectRequest.push_back((addr.s_addr >> 24) & 0xFF);
+                // IPv4 Address
+                request.push_back(Socks5::ATYP_IPV4);
+                request.push_back((addr.s_addr >> 0) & 0xFF);
+                request.push_back((addr.s_addr >> 8) & 0xFF);
+                request.push_back((addr.s_addr >> 16) & 0xFF);
+                request.push_back((addr.s_addr >> 24) & 0xFF);
             } else {
-                // 域名
-                connectRequest.push_back(Socks5::ATYP_DOMAIN);
-                connectRequest.push_back(static_cast<uint8_t>(targetHost.length()));
-                for (char c : targetHost) {
-                    connectRequest.push_back(static_cast<uint8_t>(c));
-                }
+                // Domain Name
+                request.push_back(Socks5::ATYP_DOMAIN);
+                uint8_t len = static_cast<uint8_t>(targetHost.length());
+                request.push_back(len);
+                for (char c : targetHost) request.push_back(c);
             }
             
-            // 端口 (网络字节序)
-            connectRequest.push_back((targetPort >> 8) & 0xFF);
-            connectRequest.push_back(targetPort & 0xFF);
+            // Port (Network Byte Order)
+            request.push_back((targetPort >> 8) & 0xFF);
+            request.push_back(targetPort & 0xFF);
             
-            if (send(sock, (char*)connectRequest.data(), (int)connectRequest.size(), 0) != (int)connectRequest.size()) {
+            if (send(sock, (char*)request.data(), (int)request.size(), 0) != (int)request.size()) {
                 Core::Logger::Error("SOCKS5: Failed to send connect request");
                 return false;
             }
             
-            // 接收连接响应
-            uint8_t connectResponse[10]; // 最小响应长度 (IPv4)
-            int received = recv(sock, (char*)connectResponse, 10, 0);
-            if (received < 10) {
-                Core::Logger::Error("SOCKS5: Failed to receive connect response");
+            // 3. Receive Connect Response
+            // We need to handle variable length responses carefully
+            
+            // Read Header: VER, REP, RSV, ATYP
+            uint8_t header[4];
+            if (!ReadExact(sock, header, 4)) {
+                Core::Logger::Error("SOCKS5: Failed to read response header");
                 return false;
             }
             
-            if (connectResponse[0] != Socks5::VERSION) {
-                Core::Logger::Error("SOCKS5: Invalid version in response");
+            if (header[0] != Socks5::VERSION) {
+                Core::Logger::Error("SOCKS5: Invalid protocol version in response: " + std::to_string(header[0]));
                 return false;
             }
             
-            if (connectResponse[1] != Socks5::REPLY_SUCCESS) {
-                Core::Logger::Error("SOCKS5: Connection failed, reply code: " + std::to_string(connectResponse[1]));
+            if (header[1] != Socks5::REPLY_SUCCESS) {
+                Core::Logger::Error("SOCKS5: Connection refused by proxy. Reply Code: " + std::to_string(header[1]));
+                return false;
+            }
+            
+            // Determine Address Length based on ATYP
+            uint8_t atyp = header[3];
+            int addrLen = 0;
+            switch(atyp) {
+                case Socks5::ATYP_IPV4: 
+                    addrLen = 4; 
+                    break;
+                case Socks5::ATYP_IPV6: 
+                    addrLen = 16; 
+                    break;
+                case Socks5::ATYP_DOMAIN: {
+                    uint8_t lenByte;
+                    if (!ReadExact(sock, &lenByte, 1)) {
+                        Core::Logger::Error("SOCKS5: Failed to read domain length");
+                        return false;
+                    }
+                    addrLen = lenByte;
+                    break;
+                }
+                default:
+                    Core::Logger::Error("SOCKS5: Unknown address type in response: " + std::to_string(atyp));
+                    return false;
+            }
+            
+            // Consume Address Bytes (Ignore actual value as we don't need the bind addr)
+            if (addrLen > 0) {
+                std::vector<uint8_t> trash(addrLen);
+                if (!ReadExact(sock, trash.data(), addrLen)) {
+                    Core::Logger::Error("SOCKS5: Failed to read bind address");
+                    return false;
+                }
+            }
+            
+            // Consume Port (2 bytes)
+            uint8_t portBuf[2];
+            if (!ReadExact(sock, portBuf, 2)) {
+                Core::Logger::Error("SOCKS5: Failed to read bind port");
                 return false;
             }
             
