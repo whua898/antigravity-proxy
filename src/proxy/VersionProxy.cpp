@@ -4,24 +4,14 @@
 #endif
 
 #include <windows.h>
-#include <string>
-#include <mutex>  // 用于 std::call_once
-
-// 注意：在这个文件中暂时不使用 Logger，因为懒加载可能在 DllMain 期间触发
-// 在 DllMain 中写日志可能导致问题，所以这里静默处理错误
 
 // ============================================================================
-// 懒加载机制说明：
-// 为避免在 DllMain 中调用 LoadLibraryW 导致的 Loader Lock 问题（可能触发 0xc0000022 错误），
-// 我们将系统 version.dll 的加载延迟到第一次导出函数被调用时。
-// 使用 std::call_once 保证线程安全的单次初始化。
+// 纯 C 风格的 VersionProxy
+// 移除所有 C++ 标准库依赖 (std::string, std::mutex 等)，避免 CRT 初始化问题
 // ============================================================================
 
-// 真正的 version.dll 句柄
 static HMODULE g_hRealVersionDll = NULL;
-
-// 懒加载同步标志
-static std::once_flag g_initOnceFlag;
+static volatile LONG g_initFlag = 0; // 0: 未初始化, 1: 初始化中, 2: 已初始化
 
 // 函数指针类型定义
 typedef BOOL (WINAPI *GetFileVersionInfoA_t)(LPCSTR, DWORD, DWORD, LPVOID);
@@ -61,59 +51,61 @@ static VerLanguageNameW_t fp_VerLanguageNameW = NULL;
 static VerQueryValueA_t fp_VerQueryValueA = NULL;
 static VerQueryValueW_t fp_VerQueryValueW = NULL;
 
-// ============================================================================
-// 懒加载核心函数：确保真实 version.dll 已加载
-// 使用 std::call_once 保证线程安全，且只执行一次
-// ============================================================================
+static void LoadRealDll() {
+    wchar_t systemDir[MAX_PATH];
+    if (GetSystemDirectoryW(systemDir, MAX_PATH) == 0) return;
+
+    wchar_t realPath[MAX_PATH];
+    // 简单的字符串拼接，不使用 std::wstring
+    lstrcpyW(realPath, systemDir);
+    lstrcatW(realPath, L"\\version.dll");
+
+    g_hRealVersionDll = LoadLibraryW(realPath);
+    if (!g_hRealVersionDll) return;
+
+    fp_GetFileVersionInfoA = (GetFileVersionInfoA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoA");
+    fp_GetFileVersionInfoByHandle = (GetFileVersionInfoByHandle_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoByHandle");
+    fp_GetFileVersionInfoExA = (GetFileVersionInfoExA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoExA");
+    fp_GetFileVersionInfoExW = (GetFileVersionInfoExW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoExW");
+    fp_GetFileVersionInfoSizeA = (GetFileVersionInfoSizeA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeA");
+    fp_GetFileVersionInfoSizeExA = (GetFileVersionInfoSizeExA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeExA");
+    fp_GetFileVersionInfoSizeExW = (GetFileVersionInfoSizeExW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeExW");
+    fp_GetFileVersionInfoSizeW = (GetFileVersionInfoSizeW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeW");
+    fp_GetFileVersionInfoW = (GetFileVersionInfoW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoW");
+    fp_VerFindFileA = (VerFindFileA_t)GetProcAddress(g_hRealVersionDll, "VerFindFileA");
+    fp_VerFindFileW = (VerFindFileW_t)GetProcAddress(g_hRealVersionDll, "VerFindFileW");
+    fp_VerInstallFileA = (VerInstallFileA_t)GetProcAddress(g_hRealVersionDll, "VerInstallFileA");
+    fp_VerInstallFileW = (VerInstallFileW_t)GetProcAddress(g_hRealVersionDll, "VerInstallFileW");
+    fp_VerLanguageNameA = (VerLanguageNameA_t)GetProcAddress(g_hRealVersionDll, "VerLanguageNameA");
+    fp_VerLanguageNameW = (VerLanguageNameW_t)GetProcAddress(g_hRealVersionDll, "VerLanguageNameW");
+    fp_VerQueryValueA = (VerQueryValueA_t)GetProcAddress(g_hRealVersionDll, "VerQueryValueA");
+    fp_VerQueryValueW = (VerQueryValueW_t)GetProcAddress(g_hRealVersionDll, "VerQueryValueW");
+}
+
 static void EnsureRealDllLoaded() {
-    std::call_once(g_initOnceFlag, []() {
-        // 获取系统目录路径
-        wchar_t systemDir[MAX_PATH];
-        GetSystemDirectoryW(systemDir, MAX_PATH);
-        std::wstring realPath = std::wstring(systemDir) + L"\\version.dll";
-        
-        // 加载真正的系统 version.dll
-        g_hRealVersionDll = LoadLibraryW(realPath.c_str());
-        if (!g_hRealVersionDll) {
-            // 加载失败时静默处理，函数指针保持 NULL
-            // 调用方会返回默认值（FALSE 或 0）
-            return;
+    // 双重检查锁定 (Double-Checked Locking) 的简易实现
+    if (g_initFlag == 2) return;
+
+    // 尝试获取初始化锁
+    if (InterlockedCompareExchange(&g_initFlag, 1, 0) == 0) {
+        LoadRealDll();
+        // 标记为已初始化
+        InterlockedExchange(&g_initFlag, 2);
+    } else {
+        // 另一个线程正在初始化，自旋等待
+        while (g_initFlag != 2) {
+            Sleep(1);
         }
-        
-        // 获取所有函数指针
-        fp_GetFileVersionInfoA = (GetFileVersionInfoA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoA");
-        fp_GetFileVersionInfoByHandle = (GetFileVersionInfoByHandle_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoByHandle");
-        fp_GetFileVersionInfoExA = (GetFileVersionInfoExA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoExA");
-        fp_GetFileVersionInfoExW = (GetFileVersionInfoExW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoExW");
-        fp_GetFileVersionInfoSizeA = (GetFileVersionInfoSizeA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeA");
-        fp_GetFileVersionInfoSizeExA = (GetFileVersionInfoSizeExA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeExA");
-        fp_GetFileVersionInfoSizeExW = (GetFileVersionInfoSizeExW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeExW");
-        fp_GetFileVersionInfoSizeW = (GetFileVersionInfoSizeW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeW");
-        fp_GetFileVersionInfoW = (GetFileVersionInfoW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoW");
-        fp_VerFindFileA = (VerFindFileA_t)GetProcAddress(g_hRealVersionDll, "VerFindFileA");
-        fp_VerFindFileW = (VerFindFileW_t)GetProcAddress(g_hRealVersionDll, "VerFindFileW");
-        fp_VerInstallFileA = (VerInstallFileA_t)GetProcAddress(g_hRealVersionDll, "VerInstallFileA");
-        fp_VerInstallFileW = (VerInstallFileW_t)GetProcAddress(g_hRealVersionDll, "VerInstallFileW");
-        fp_VerLanguageNameA = (VerLanguageNameA_t)GetProcAddress(g_hRealVersionDll, "VerLanguageNameA");
-        fp_VerLanguageNameW = (VerLanguageNameW_t)GetProcAddress(g_hRealVersionDll, "VerLanguageNameW");
-        fp_VerQueryValueA = (VerQueryValueA_t)GetProcAddress(g_hRealVersionDll, "VerQueryValueA");
-        fp_VerQueryValueW = (VerQueryValueW_t)GetProcAddress(g_hRealVersionDll, "VerQueryValueW");
-    });
+    }
 }
 
 namespace VersionProxy {
-    // ============================================================================
-    // Initialize 函数现在是空操作（NOP）
-    // 真正的初始化延迟到导出函数首次被调用时
-    // 这样可以避免在 DllMain 中调用 LoadLibraryW 导致的 Loader Lock 问题
-    // ============================================================================
     bool Initialize() {
-        // 不再在这里加载 DLL，改为懒加载模式
-        // 返回 true 表示"初始化成功"（实际上什么都没做）
+        // 可以在这里预加载，也可以完全懒加载
+        // EnsureRealDllLoaded();
         return true;
     }
     
-    // 卸载
     void Uninitialize() {
         if (g_hRealVersionDll) {
             FreeLibrary(g_hRealVersionDll);
@@ -122,13 +114,10 @@ namespace VersionProxy {
     }
 }
 
-// ============= 导出函数实现 (转发到真正的 DLL) =============
-// 每个导出函数首先调用 EnsureRealDllLoaded() 确保系统 version.dll 已加载
-
 extern "C" {
 
 BOOL WINAPI VersionProxy_GetFileVersionInfoA(LPCSTR lptstrFilename, DWORD dwHandle, DWORD dwLen, LPVOID lpData) {
-    EnsureRealDllLoaded();  // 懒加载：首次调用时加载系统 version.dll
+    EnsureRealDllLoaded();
     return fp_GetFileVersionInfoA ? fp_GetFileVersionInfoA(lptstrFilename, dwHandle, dwLen, lpData) : FALSE;
 }
 
@@ -213,4 +202,3 @@ BOOL WINAPI VersionProxy_VerQueryValueW(LPCVOID pBlock, LPCWSTR lpSubBlock, LPVO
 }
 
 } // extern "C"
-

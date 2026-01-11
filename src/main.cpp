@@ -21,17 +21,16 @@ namespace VersionProxy {
 
 // 初始化线程函数
 void InitializationThread() {
-    // 调试模式：先写个日志证明线程跑起来了
-    // 注意：此时 Config 还没加载，日志会写到默认位置
-    // Core::Logger::Info("Debug: Init thread started, waiting 3s...");
-
-    // 延长等待时间到 3 秒，确保 PyCharm 界面完全出来
+    // 针对 PyCharm/JVM 的特殊优化：
+    // JVM 启动初期极其脆弱，任何对内存/线程的修改都可能导致 crash 或 1114 错误。
+    // 我们给予 3000ms 的"安全窗口"，让 JVM 完成核心初始化 (加载 jvm.dll, 初始化 GC 等)。
+    // 对于 IDE 插件代理来说，这个延迟是完全可以接受的。
     Sleep(3000);
 
-    // Core::Logger::Info("Debug: Loading config...");
+    // 加载配置
     Core::Config::Instance().Load("config.json");
 
-    // Core::Logger::Info("Debug: Installing hooks...");
+    // 安装 Hooks
     Hooks::Install();
 
     Core::Logger::Info("Antigravity-Proxy 初始化完成 (Delayed 3000ms)");
@@ -42,12 +41,10 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hinstDLL);
 
-        // 1. 优先保证 DLL 转发功能正常
+        // VersionProxy 纯 C 实现，无 CRT 依赖，安全
         VersionProxy::Initialize();
         
-        // 2. 启动 Hook 线程
-        // 如果 PyCharm 启动失败，请尝试注释掉下面这块代码块，
-        // 如果注释后能启动，说明是 Hook 逻辑冲突；如果还不能，说明是 DLL 转发/架构问题。
+        // 启动异步初始化线程
         {
             HANDLE hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InitializationThread, NULL, 0, NULL);
             if (hThread) {
