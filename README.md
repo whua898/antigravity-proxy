@@ -229,6 +229,8 @@ setx ANTIGRAVITY_HOME "%LOCALAPPDATA%\Programs\Antigravity"
 |------|------|---------|-------------|
 | 🔀 **代理重定向** | 拦截 `connect()` 调用，重定向至代理服务器 | Proxy Redirect | Intercepts `connect()` and redirects to proxy |
 | 🌐 **FakeIP 系统** | 拦截 DNS 解析，分配虚拟 IP 并建立映射 | FakeIP System | Intercepts DNS, allocates virtual IPs |
+| 🔍 **自动探测** | 自动识别 Clash/V2Ray 等常见代理端口 | Auto Detect | Auto-detects common proxy ports |
+| 🔄 **故障自愈** | 代理端口变更时自动重新探测并重连 | Auto Healing | Auto re-detects port on connection failure |
 | 👶 **子进程注入** | 自动将 DLL 注入到子进程 | Child Injection | Auto-injects DLL into child processes |
 | ⏱️ **超时控制** | 防止目标程序因网络问题卡死 | Timeout Control | Prevents hanging on network issues |
 | 🔄 **Fail-Safe** | 配置加载失败时自动直连 | Fail-Safe | Falls back to direct connection on error |
@@ -449,7 +451,7 @@ target_link_libraries(version PRIVATE ws2_32)
 {
     "proxy": {
         "host": "127.0.0.1",
-        "port": 7890,
+        "port": 0,
         "type": "socks5"
     },
     "fake_ip": {
@@ -470,6 +472,8 @@ target_link_libraries(version PRIVATE ws2_32)
 }
 ```
 
+> 💡 **提示**：`port` 默认为 `0`，程序会自动扫描常用端口（如 7890, 10808 等）或读取环境变量。
+
 #### Step 3: 部署 DLL / Deploy DLL
 
 将 `version.dll` 和 `config.json` 复制到目标程序的**同一目录**：
@@ -488,7 +492,7 @@ target_link_libraries(version PRIVATE ws2_32)
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `proxy.host` | string | `"127.0.0.1"` | 代理服务器地址 |
-| `proxy.port` | int | `7890` | 代理服务器端口 |
+| `proxy.port` | int | `0` | 代理端口 (0=自动探测/读取环境变量) |
 | `proxy.type` | string | `"socks5"` | 代理类型: `socks5` 或 `http` |
 | `fake_ip.enabled` | bool | `true` | 是否启用 FakeIP 系统 |
 | `fake_ip.cidr` | string | `"198.18.0.0/15"` | FakeIP 地址范围 (基准测试保留网段) |
@@ -676,7 +680,7 @@ export HTTP_PROXY=http://127.0.0.1:7890
 {
     "proxy": {
         "host": "127.0.0.1",
-        "port": 7890,
+        "port": 0,
         "type": "socks5"
     },
     "child_injection": true,
