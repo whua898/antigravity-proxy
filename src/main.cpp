@@ -4,6 +4,7 @@
 #endif
 
 #include <windows.h>
+#include <thread>
 #include "core/Config.hpp"
 #include "core/Logger.hpp"
 
@@ -18,32 +19,46 @@ namespace VersionProxy {
     void Uninitialize();
 }
 
+// 初始化线程函数
+// 将 Hook 安装移出 DllMain，避免 Loader Lock 导致的死锁或初始化失败 (如 os error 1114)
+void InitializationThread() {
+    // 稍微延迟一下，确保宿主进程的主要模块已加载
+    Sleep(100);
+
+    // 加载配置
+    Core::Config::Instance().Load("config.json");
+
+    // 安装 Hooks
+    Hooks::Install();
+
+    Core::Logger::Info("Antigravity-Proxy 初始化完成 (Thread Mode)");
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     switch (fdwReason) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hinstDLL);
+
+        // VersionProxy 采用懒加载模式，此处仅做占位
+        VersionProxy::Initialize();
         
-        // ============================================================================
-        // VersionProxy 采用懒加载模式 (Lazy Initialization)
-        // Initialize() 现在是空操作，真正的系统 version.dll 会在导出函数首次被调用时加载
-        // 这样可以避免在 DllMain 中调用 LoadLibraryW 导致的 Loader Lock 问题
-        // （可能触发 0xc0000022 STATUS_ACCESS_DENIED 错误）
-        // ============================================================================
-        VersionProxy::Initialize();  // 空操作，保持接口兼容
-        
-        Core::Logger::Info("Antigravity-Proxy DLL 已加载 (模拟 version.dll)");
-        
-        // 加载配置
-        Core::Config::Instance().Load("config.json");
-        
-        // 安装 Hooks（必须及时安装以确保网络流量被正确拦截）
-        Hooks::Install();
+        // 关键修正：不要在 DllMain 中直接安装 Hook
+        // PyCharm/JVM 等复杂应用在加载 DLL 时非常敏感，直接 Hook 易导致 ERROR_DLL_INIT_FAILED
+        // 创建一个线程来异步执行初始化
+        {
+            HANDLE hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InitializationThread, NULL, 0, NULL);
+            if (hThread) {
+                CloseHandle(hThread);
+            } else {
+                // 如果线程创建失败，回退到同步尝试（虽然风险大，但总比什么都不做强）
+                InitializationThread();
+            }
+        }
         break;
         
     case DLL_PROCESS_DETACH:
         Hooks::Uninstall();
         VersionProxy::Uninitialize();
-        Core::Logger::Info("Antigravity-Proxy DLL 已卸载");
         break;
     }
     return TRUE;
