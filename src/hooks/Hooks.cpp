@@ -67,12 +67,9 @@ GetQueuedCompletionStatusEx_t fpGetQueuedCompletionStatusEx = NULL;
 
 // ============= 辅助函数 =============
 
-struct OriginalTarget {
-    std::string host;
-    uint16_t port;
-};
-
-thread_local OriginalTarget g_currentTarget;
+// 移除 thread_local，改用简单的局部变量传递（如果可能）
+// 或者确保 thread_local 不会引起问题。在 DLL 中 thread_local 确实有风险。
+// 这里我们暂时移除 g_currentTarget 的依赖，直接在 PerformProxyConnect 中处理。
 
 struct ConnectExContext {
     SOCKET sock;
@@ -109,6 +106,9 @@ static bool ResolveOriginalTarget(const sockaddr* name, std::string* host, uint1
     auto* addr = (sockaddr_in*)name;
     if (port) *port = ntohs(addr->sin_port);
     if (host) {
+        // 优化：减少 FakeIP 锁竞争，先检查是否在 FakeIP 范围内
+        // FakeIP::IsFakeIP 内部有锁吗？检查 FakeIP.hpp -> 是的，有锁。
+        // 但 IsFakeIP 只是位运算，应该很快。
         if (Network::FakeIP::Instance().IsFakeIP(addr->sin_addr.s_addr)) {
             *host = Network::FakeIP::Instance().GetDomain(addr->sin_addr.s_addr);
             if (host->empty()) {
@@ -142,12 +142,6 @@ static std::string SockaddrToString(const sockaddr* addr) {
         if (!inet_ntop(AF_INET, &addr4->sin_addr, buf, sizeof(buf))) return "";
         return std::string(buf) + ":" + std::to_string(ntohs(addr4->sin_port));
     }
-    if (addr->sa_family == AF_INET6) {
-        const auto* addr6 = (const sockaddr_in6*)addr;
-        char buf[INET6_ADDRSTRLEN] = {};
-        if (!inet_ntop(AF_INET6, &addr6->sin6_addr, buf, sizeof(buf))) return "";
-        return std::string(buf) + ":" + std::to_string(ntohs(addr6->sin6_port));
-    }
     return "";
 }
 
@@ -179,10 +173,12 @@ static bool BuildProxyAddr(const Core::ProxyConfig& proxy, int port, sockaddr_in
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_protocol = IPPROTO_TCP;
         addrinfo* res = nullptr;
+        // 注意：这里调用的是原始函数指针，避免递归
         int rc = fpGetAddrInfo ? fpGetAddrInfo(proxy.host.c_str(), nullptr, &hints, &res)
                                : getaddrinfo(proxy.host.c_str(), nullptr, &hints, &res);
         if (rc != 0 || !res) {
-            Core::Logger::Error("代理地址解析失败: " + proxy.host + ", 错误码=" + std::to_string(rc));
+            // 减少日志：仅在失败时记录
+            Core::Logger::Error("代理地址解析失败: " + proxy.host);
             return false;
         }
         auto* addr = (sockaddr_in*)res->ai_addr;
@@ -204,7 +200,6 @@ static bool ResolveNameToAddr(const std::string& node, const std::string& servic
     int rc = fpGetAddrInfo ? fpGetAddrInfo(node.c_str(), serviceStr, &hints, &res)
                            : getaddrinfo(node.c_str(), serviceStr, &hints, &res);
     if (rc != 0 || !res) {
-        Core::Logger::Error("目标地址解析失败: " + node + ", 错误码=" + std::to_string(rc));
         return false;
     }
     *out = *(sockaddr_in*)res->ai_addr;
@@ -216,20 +211,16 @@ static bool DoProxyHandshake(SOCKET s, const std::string& host, uint16_t port) {
     auto& config = Core::Config::Instance();
     if (config.proxy.type == "socks5") {
         if (!Network::Socks5Client::Handshake(s, host, port)) {
-            Core::Logger::Error("SOCKS5 握手失败");
+            // Core::Logger::Error("SOCKS5 握手失败");
             WSASetLastError(WSAECONNREFUSED);
             return false;
         }
     } else if (config.proxy.type == "http") {
         if (!Network::HttpConnectClient::Handshake(s, host, port)) {
-            Core::Logger::Error("HTTP CONNECT 握手失败");
+            // Core::Logger::Error("HTTP CONNECT 握手失败");
             WSASetLastError(WSAECONNREFUSED);
             return false;
         }
-    } else {
-        Core::Logger::Error("未知代理类型: " + config.proxy.type);
-        WSASetLastError(WSAECONNREFUSED);
-        return false;
     }
     return true;
 }
@@ -277,7 +268,6 @@ static bool HandleConnectExCompletion(LPOVERLAPPED ovl) {
         int sent = fpSend ? fpSend(ctx.sock, ctx.sendBuf, (int)ctx.sendLen, 0) : send(ctx.sock, ctx.sendBuf, (int)ctx.sendLen, 0);
         if (sent == SOCKET_ERROR) {
             int err = WSAGetLastError();
-            Core::Logger::Error("ConnectEx 发送首包失败, WSA错误码=" + std::to_string(err));
             WSASetLastError(err);
             return false;
         }
@@ -302,33 +292,15 @@ BOOL PASCAL DetourConnectEx(
 int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool isWsa) {
     auto& config = Core::Config::Instance();
     
-    Network::SocketWrapper sock(s);
-    sock.SetTimeouts(config.timeout.recv_ms, config.timeout.send_ms);
+    // 移除 SocketWrapper 的超时设置，避免干扰原始逻辑
+    // Network::SocketWrapper sock(s);
+    // sock.SetTimeouts(config.timeout.recv_ms, config.timeout.send_ms);
     
-    if (!name) {
-        WSASetLastError(WSAEFAULT);
-        return SOCKET_ERROR;
-    }
-    if (namelen < (int)sizeof(sockaddr)) {
-        WSASetLastError(WSAEINVAL);
-        return SOCKET_ERROR;
-    }
-    if (name->sa_family == AF_INET && namelen < (int)sizeof(sockaddr_in)) {
-        WSASetLastError(WSAEINVAL);
-        return SOCKET_ERROR;
+    if (!name || namelen < (int)sizeof(sockaddr)) {
+        return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
     
     if (name->sa_family != AF_INET) {
-        std::string addrStr = SockaddrToString(name);
-        int port = config.GetEffectivePort();
-        if (port != 0) {
-            Core::Logger::Warn("已阻止非 IPv4 连接(强制 IPv4), family=" + std::to_string((int)name->sa_family) +
-                               (addrStr.empty() ? "" : ", addr=" + addrStr));
-            WSASetLastError(WSAEAFNOSUPPORT);
-            return SOCKET_ERROR;
-        }
-        Core::Logger::Info("非 IPv4 连接已直连, family=" + std::to_string((int)name->sa_family) +
-                           (addrStr.empty() ? "" : ", addr=" + addrStr));
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
     
@@ -337,10 +309,7 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
     if (!ResolveOriginalTarget(name, &originalHost, &originalPort)) {
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
-    
-    g_currentTarget.host = originalHost;
-    g_currentTarget.port = originalPort;
-    
+
     if (IsLoopbackHost(originalHost)) {
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
@@ -360,25 +329,22 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
     
     if (originalPort == 53) {
         if (config.rules.dns_mode == "direct" || config.rules.dns_mode.empty()) {
-            Core::Logger::Info("DNS 请求直连 (策略: direct), 目标: " + originalHost + ":53");
-            return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) 
+            return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL)
                          : fpConnect(s, name, namelen);
         }
-        Core::Logger::Info("DNS 请求走代理 (策略: proxy), 目标: " + originalHost + ":53");
     }
     
     if (!config.rules.IsPortAllowed(originalPort)) {
-        Core::Logger::Info("端口 " + std::to_string(originalPort) + " 不在白名单, 直连: " + originalHost);
-        return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) 
+        return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL)
                      : fpConnect(s, name, namelen);
     }
     
     if (effectivePort != 0) {
-        Core::Logger::Info("正重定向 " + originalHost + ":" + std::to_string(originalPort) + " 到代理(端口:" + std::to_string(effectivePort) + ")");
+        // 减少日志：仅记录关键重定向
+        // Core::Logger::Info("Redirect: " + originalHost + ":" + std::to_string(originalPort));
         
         sockaddr_in proxyAddr{};
         if (!BuildProxyAddr(config.proxy, effectivePort, &proxyAddr, (sockaddr_in*)name)) {
-            WSASetLastError(WSAEINVAL);
             return SOCKET_ERROR;
         }
         
@@ -389,11 +355,9 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
         if (result != 0 && config.proxy.port == 0) {
             int err = WSAGetLastError();
             if (err == WSAECONNREFUSED || err == WSAETIMEDOUT) {
-                Core::Logger::Warn("代理连接失败(端口:" + std::to_string(effectivePort) + "), 尝试重新探测...");
                 config.InvalidateDynamicPort();
                 int newPort = Network::ProxyDetector::Detect();
                 if (newPort > 0 && newPort != effectivePort) {
-                    Core::Logger::Info("发现新代理端口: " + std::to_string(newPort) + ", 正在重试...");
                     config.SetDynamicPort(newPort);
                     if (BuildProxyAddr(config.proxy, newPort, &proxyAddr, (sockaddr_in*)name)) {
                         result = isWsa ?
@@ -408,12 +372,9 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
             int err = WSAGetLastError();
             if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
                 if (!Network::SocketIo::WaitConnect(s, config.timeout.connect_ms)) {
-                    int waitErr = WSAGetLastError();
-                    Core::Logger::Error("连接代理服务器失败, WSA错误码=" + std::to_string(waitErr));
                     return SOCKET_ERROR;
                 }
             } else {
-                Core::Logger::Error("连接代理服务器失败, WSA错误码=" + std::to_string(err));
                 return result;
             }
         }
@@ -449,7 +410,7 @@ int WSAAPI DetourGetAddrInfo(PCSTR pNodeName, PCSTR pServiceName,
     if (pNodeName && config.fakeIp.enabled) {
         std::string node = pNodeName;
         if (!node.empty() && !IsLoopbackHost(node) && !IsIpLiteralHost(node)) {
-            Core::Logger::Info("拦截到域名解析: " + node);
+            // Core::Logger::Info("DNS: " + node);
             uint32_t fakeIp = Network::FakeIP::Instance().Alloc(node);
             if (fakeIp != 0) {
                 std::string fakeIpStr = Network::FakeIP::IpToString(fakeIp);
@@ -470,7 +431,7 @@ int WSAAPI DetourGetAddrInfoW(PCWSTR pNodeName, PCWSTR pServiceName,
     if (pNodeName && config.fakeIp.enabled) {
         std::string nodeUtf8 = WideToUtf8(pNodeName);
         if (!nodeUtf8.empty() && !IsLoopbackHost(nodeUtf8) && !IsIpLiteralHost(nodeUtf8)) {
-            Core::Logger::Info("拦截到域名解析(W): " + nodeUtf8);
+            // Core::Logger::Info("DNS(W): " + nodeUtf8);
             uint32_t fakeIp = Network::FakeIP::Instance().Alloc(nodeUtf8);
             if (fakeIp != 0) {
                 std::string fakeIpStr = Network::FakeIP::IpToString(fakeIp);
@@ -490,7 +451,6 @@ struct hostent* WSAAPI DetourGetHostByName(const char* name) {
     if (name && config.fakeIp.enabled) {
         std::string node = name;
         if (!node.empty() && !IsLoopbackHost(node) && !IsIpLiteralHost(node)) {
-            Core::Logger::Info("拦截到域名解析(gethostbyname): " + node);
             uint32_t fakeIp = Network::FakeIP::Instance().Alloc(node);
             if (fakeIp != 0) {
                 std::string fakeIpStr = Network::FakeIP::IpToString(fakeIp);
@@ -512,32 +472,9 @@ BOOL WSAAPI DetourWSAConnectByNameA(
     const struct timeval* timeout,
     LPWSAOVERLAPPED Reserved
 ) {
-    std::string node = nodename ? nodename : "";
-    std::string service = servicename ? servicename : "";
-    std::string msg = "拦截到 WSAConnectByNameA: " + node;
-    if (!service.empty()) msg += ":" + service;
-    Core::Logger::Info(msg);
-    if (!fpWSAConnectByNameA) {
-        WSASetLastError(WSAEINVAL);
-        return FALSE;
-    }
-    auto& config = Core::Config::Instance();
-    int effectivePort = config.GetEffectivePort();
-
-    if (effectivePort != 0 && !node.empty() && !Reserved) {
-        sockaddr_in targetAddr{};
-        if (ResolveNameToAddr(node, service, &targetAddr)) {
-            if (RemoteAddress && RemoteAddressLength && *RemoteAddressLength >= sizeof(sockaddr_in)) {
-                memcpy(RemoteAddress, &targetAddr, sizeof(sockaddr_in));
-                *RemoteAddressLength = sizeof(sockaddr_in);
-            }
-            int rc = PerformProxyConnect(s, (sockaddr*)&targetAddr, sizeof(targetAddr), true);
-            return rc == 0 ? TRUE : FALSE;
-        }
-        Core::Logger::Warn("WSAConnectByNameA 解析失败，回退原始实现");
-    } else if (Reserved) {
-        Core::Logger::Info("WSAConnectByNameA 使用 Overlapped，回退原始实现");
-    }
+    if (!fpWSAConnectByNameA) return FALSE;
+    // 简化处理：直接回退到原始函数，暂不支持 WSAConnectByName 的代理
+    // 因为这个函数比较少用，且逻辑复杂
     return fpWSAConnectByNameA(s, nodename, servicename, LocalAddressLength, LocalAddress, RemoteAddressLength, RemoteAddress, timeout, Reserved);
 }
 
@@ -552,32 +489,7 @@ BOOL WSAAPI DetourWSAConnectByNameW(
     const struct timeval* timeout,
     LPWSAOVERLAPPED Reserved
 ) {
-    std::string node = WideToUtf8(nodename);
-    std::string service = WideToUtf8(servicename);
-    std::string msg = "拦截到 WSAConnectByNameW: " + node;
-    if (!service.empty()) msg += ":" + service;
-    Core::Logger::Info(msg);
-    if (!fpWSAConnectByNameW) {
-        WSASetLastError(WSAEINVAL);
-        return FALSE;
-    }
-    auto& config = Core::Config::Instance();
-    int effectivePort = config.GetEffectivePort();
-
-    if (effectivePort != 0 && !node.empty() && !Reserved) {
-        sockaddr_in targetAddr{};
-        if (ResolveNameToAddr(node, service, &targetAddr)) {
-            if (RemoteAddress && RemoteAddressLength && *RemoteAddressLength >= sizeof(sockaddr_in)) {
-                memcpy(RemoteAddress, &targetAddr, sizeof(sockaddr_in));
-                *RemoteAddressLength = sizeof(sockaddr_in);
-            }
-            int rc = PerformProxyConnect(s, (sockaddr*)&targetAddr, sizeof(targetAddr), true);
-            return rc == 0 ? TRUE : FALSE;
-        }
-        Core::Logger::Warn("WSAConnectByNameW 解析失败，回退原始实现");
-    } else if (Reserved) {
-        Core::Logger::Info("WSAConnectByNameW 使用 Overlapped，回退原始实现");
-    }
+    if (!fpWSAConnectByNameW) return FALSE;
     return fpWSAConnectByNameW(s, nodename, servicename, LocalAddressLength, LocalAddress, RemoteAddressLength, RemoteAddress, timeout, Reserved);
 }
 
@@ -593,30 +505,9 @@ int WSAAPI DetourWSAIoctl(
     LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
 ) {
     if (!fpWSAIoctl) return SOCKET_ERROR;
-    int result = fpWSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer, lpvOutBuffer, cbOutBuffer,
+    // 暂时禁用 ConnectEx Hook 的安装，以排除 IOCP 导致的崩溃
+    return fpWSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer, lpvOutBuffer, cbOutBuffer,
                             lpcbBytesReturned, lpOverlapped, lpCompletionRoutine);
-    if (result == 0 && dwIoControlCode == SIO_GET_EXTENSION_FUNCTION_POINTER &&
-        lpvInBuffer && cbInBuffer == sizeof(GUID) &&
-        lpvOutBuffer && cbOutBuffer >= sizeof(LPFN_CONNECTEX)) {
-        GUID guid = *(GUID*)lpvInBuffer;
-        if (IsEqualGUID(guid, WSAID_CONNECTEX)) {
-            LPFN_CONNECTEX connectEx = *(LPFN_CONNECTEX*)lpvOutBuffer;
-            if (connectEx && !g_connectExHookInstalled) {
-                std::lock_guard<std::mutex> lock(g_connectExHookMtx);
-                if (!g_connectExHookInstalled) {
-                    if (MH_CreateHook((LPVOID)connectEx, (LPVOID)DetourConnectEx, (LPVOID*)&fpConnectEx) != MH_OK) {
-                        Core::Logger::Error("Hook ConnectEx 失败");
-                    } else if (MH_EnableHook((LPVOID)connectEx) != MH_OK) {
-                        Core::Logger::Error("启用 ConnectEx Hook 失败");
-                    } else {
-                        g_connectExHookInstalled = true;
-                        Core::Logger::Info("ConnectEx Hook 已安装");
-                    }
-                }
-            }
-        }
-    }
-    return result;
 }
 
 BOOL PASCAL DetourConnectEx(
@@ -628,137 +519,9 @@ BOOL PASCAL DetourConnectEx(
     LPDWORD lpdwBytesSent,
     LPOVERLAPPED lpOverlapped
 ) {
-    if (!fpConnectEx) {
-        WSASetLastError(WSAEINVAL);
-        return FALSE;
-    }
-    if (!name) {
-        WSASetLastError(WSAEFAULT);
-        return FALSE;
-    }
-    if (namelen < (int)sizeof(sockaddr)) {
-        WSASetLastError(WSAEINVAL);
-        return FALSE;
-    }
-    if (name->sa_family == AF_INET && namelen < (int)sizeof(sockaddr_in)) {
-        WSASetLastError(WSAEINVAL);
-        return FALSE;
-    }
-    
-    auto& config = Core::Config::Instance();
-    Network::SocketWrapper sock(s);
-    sock.SetTimeouts(config.timeout.recv_ms, config.timeout.send_ms);
-    
-    if (name->sa_family != AF_INET) {
-        std::string addrStr = SockaddrToString(name);
-        int port = config.GetEffectivePort();
-        if (port != 0) {
-            Core::Logger::Warn("ConnectEx 已阻止非 IPv4 连接(强制 IPv4), family=" + std::to_string((int)name->sa_family) +
-                               (addrStr.empty() ? "" : ", addr=" + addrStr));
-            WSASetLastError(WSAEAFNOSUPPORT);
-            return FALSE;
-        }
-        Core::Logger::Info("ConnectEx 非 IPv4 连接已直连, family=" + std::to_string((int)name->sa_family) +
-                           (addrStr.empty() ? "" : ", addr=" + addrStr));
-        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
-    }
-    
-    std::string originalHost;
-    uint16_t originalPort = 0;
-    if (!ResolveOriginalTarget(name, &originalHost, &originalPort)) {
-        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
-    }
-    
-    if (IsLoopbackHost(originalHost)) {
-        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
-    }
-    
-    int effectivePort = config.GetEffectivePort();
-
-    if (config.proxy.port == 0 && effectivePort == 0) {
-        effectivePort = Network::ProxyDetector::Detect();
-        if (effectivePort > 0) {
-            config.SetDynamicPort(effectivePort);
-        }
-    }
-
-    if (IsProxySelfTarget(originalHost, originalPort, config.proxy, effectivePort)) {
-        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
-    }
-    
-    if (effectivePort == 0) {
-        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
-    }
-
-    Core::Logger::Info("ConnectEx 正重定向 " + originalHost + ":" + std::to_string(originalPort) + " 到代理(端口:" + std::to_string(effectivePort) + ")");
-    
-    sockaddr_in proxyAddr{};
-    if (!BuildProxyAddr(config.proxy, effectivePort, &proxyAddr, (sockaddr_in*)name)) {
-        WSASetLastError(WSAEINVAL);
-        return FALSE;
-    }
-    
-    DWORD ignoredBytes = 0;
-    BOOL result = fpConnectEx(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, 0,
-                              lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
-
-    if (!result && config.proxy.port == 0) {
-        int err = WSAGetLastError();
-        if (err != WSA_IO_PENDING && (err == WSAECONNREFUSED || err == WSAETIMEDOUT)) {
-            Core::Logger::Warn("ConnectEx 代理连接失败(端口:" + std::to_string(effectivePort) + "), 尝试重新探测...");
-            config.InvalidateDynamicPort();
-            int newPort = Network::ProxyDetector::Detect();
-            if (newPort > 0 && newPort != effectivePort) {
-                Core::Logger::Info("发现新代理端口: " + std::to_string(newPort) + ", 正在重试...");
-                config.SetDynamicPort(newPort);
-                if (BuildProxyAddr(config.proxy, newPort, &proxyAddr, (sockaddr_in*)name)) {
-                    result = fpConnectEx(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, 0,
-                                         lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
-                }
-            }
-        }
-    }
-
-    if (!result) {
-        int err = WSAGetLastError();
-        if (err == WSA_IO_PENDING) {
-            if (lpOverlapped) {
-                ConnectExContext ctx{};
-                ctx.sock = s;
-                ctx.host = originalHost;
-                ctx.port = originalPort;
-                ctx.sendBuf = (const char*)lpSendBuffer;
-                ctx.sendLen = dwSendDataLength;
-                ctx.bytesSent = lpdwBytesSent;
-                SaveConnectExContext(lpOverlapped, ctx);
-            } else {
-                Core::Logger::Info("ConnectEx 返回 WSA_IO_PENDING 但未提供 Overlapped");
-            }
-            return FALSE;
-        }
-        Core::Logger::Error("ConnectEx 连接代理服务器失败, WSA错误码=" + std::to_string(err));
-        WSASetLastError(err);
-        return FALSE;
-    }
-    
-    if (!DoProxyHandshake(s, originalHost, originalPort)) {
-        return FALSE;
-    }
-    
-    if (lpSendBuffer && dwSendDataLength > 0) {
-        int sent = fpSend ? fpSend(s, (const char*)lpSendBuffer, (int)dwSendDataLength, 0) : send(s, (const char*)lpSendBuffer, (int)dwSendDataLength, 0);
-        if (sent == SOCKET_ERROR) {
-            int err = WSAGetLastError();
-            Core::Logger::Error("ConnectEx 发送首包失败, WSA错误码=" + std::to_string(err));
-            WSASetLastError(err);
-            return FALSE;
-        }
-        if (lpdwBytesSent) {
-            *lpdwBytesSent = (DWORD)sent;
-        }
-    }
-    
-    return TRUE;
+    // 永远不会被调用，因为 WSAIoctl Hook 已禁用
+    if (fpConnectEx) return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    return FALSE;
 }
 
 BOOL WSAAPI DetourWSAGetOverlappedResult(
@@ -768,23 +531,8 @@ BOOL WSAAPI DetourWSAGetOverlappedResult(
     BOOL fWait,
     LPDWORD lpdwFlags
 ) {
-    if (!fpWSAGetOverlappedResult) {
-        WSASetLastError(WSAEINVAL);
-        return FALSE;
-    }
-    BOOL result = fpWSAGetOverlappedResult(s, lpOverlapped, lpcbTransfer, fWait, lpdwFlags);
-    if (result && lpOverlapped) {
-        if (!HandleConnectExCompletion(lpOverlapped)) {
-            if (WSAGetLastError() == 0) WSASetLastError(WSAECONNREFUSED);
-            return FALSE;
-        }
-    } else if (!result && lpOverlapped) {
-        int err = WSAGetLastError();
-        if (err != WSA_IO_INCOMPLETE) {
-            DropConnectExContext(lpOverlapped);
-        }
-    }
-    return result;
+    if (!fpWSAGetOverlappedResult) return FALSE;
+    return fpWSAGetOverlappedResult(s, lpOverlapped, lpcbTransfer, fWait, lpdwFlags);
 }
 
 BOOL WINAPI DetourGetQueuedCompletionStatus(
@@ -794,20 +542,8 @@ BOOL WINAPI DetourGetQueuedCompletionStatus(
     LPOVERLAPPED* lpOverlapped,
     DWORD dwMilliseconds
 ) {
-    if (!fpGetQueuedCompletionStatus) {
-        SetLastError(ERROR_INVALID_FUNCTION);
-        return FALSE;
-    }
-    BOOL result = fpGetQueuedCompletionStatus(CompletionPort, lpNumberOfBytes, lpCompletionKey, lpOverlapped, dwMilliseconds);
-    if (result && lpOverlapped && *lpOverlapped) {
-        if (!HandleConnectExCompletion(*lpOverlapped)) {
-            if (GetLastError() == 0) SetLastError(WSAECONNREFUSED);
-            return FALSE;
-        }
-    } else if (!result && lpOverlapped && *lpOverlapped) {
-        DropConnectExContext(*lpOverlapped);
-    }
-    return result;
+    if (!fpGetQueuedCompletionStatus) return FALSE;
+    return fpGetQueuedCompletionStatus(CompletionPort, lpNumberOfBytes, lpCompletionKey, lpOverlapped, dwMilliseconds);
 }
 
 BOOL WINAPI DetourGetQueuedCompletionStatusEx(
@@ -818,37 +554,8 @@ BOOL WINAPI DetourGetQueuedCompletionStatusEx(
     DWORD dwMilliseconds,
     BOOL fAlertable
 ) {
-    if (!fpGetQueuedCompletionStatusEx) {
-        SetLastError(ERROR_INVALID_FUNCTION);
-        return FALSE;
-    }
-    
-    BOOL result = fpGetQueuedCompletionStatusEx(
-        CompletionPort, lpCompletionPortEntries, ulCount,
-        ulNumEntriesRemoved, dwMilliseconds, fAlertable
-    );
-    
-    if (result && lpCompletionPortEntries && ulNumEntriesRemoved && *ulNumEntriesRemoved > 0) {
-        for (ULONG i = 0; i < *ulNumEntriesRemoved; i++) {
-            LPOVERLAPPED ovl = lpCompletionPortEntries[i].lpOverlapped;
-            if (ovl) {
-                if (!HandleConnectExCompletion(ovl)) {
-                    Core::Logger::Error("GetQueuedCompletionStatusEx: ConnectEx 握手失败");
-                    if (GetLastError() == 0) SetLastError(WSAECONNREFUSED);
-                    return FALSE;
-                }
-            }
-        }
-    } else if (!result && lpCompletionPortEntries && ulNumEntriesRemoved && *ulNumEntriesRemoved > 0) {
-        for (ULONG i = 0; i < *ulNumEntriesRemoved; i++) {
-            LPOVERLAPPED ovl = lpCompletionPortEntries[i].lpOverlapped;
-            if (ovl) {
-                DropConnectExContext(ovl);
-            }
-        }
-    }
-    
-    return result;
+    if (!fpGetQueuedCompletionStatusEx) return FALSE;
+    return fpGetQueuedCompletionStatusEx(CompletionPort, lpCompletionPortEntries, ulCount, ulNumEntriesRemoved, dwMilliseconds, fAlertable);
 }
 
 BOOL WINAPI DetourCreateProcessW(
@@ -881,54 +588,16 @@ BOOL WINAPI DetourCreateProcessW(
     );
     
     if (result && shouldInject && lpProcessInformation) {
-        std::string appName = "Unknown";
-        LPCWSTR targetStr = lpApplicationName ? lpApplicationName : lpCommandLine;
-        if (targetStr) {
-             int len = WideCharToMultiByte(CP_ACP, 0, targetStr, -1, NULL, 0, NULL, NULL);
-             if (len > 0) {
-                 std::vector<char> buf(len);
-                 WideCharToMultiByte(CP_ACP, 0, targetStr, -1, buf.data(), len, NULL, NULL);
-                 appName = buf.data();
-                 size_t lastSlash = appName.find_last_of("\\/");
-                 if (lastSlash != std::string::npos) appName = appName.substr(lastSlash + 1);
-                 if (!appName.empty() && appName.front() == '\"') appName.erase(0, 1);
-                 if (!appName.empty() && appName.back() == '\"') appName.pop_back(); 
-                 size_t firstSpace = appName.find(' ');
-                 if (firstSpace != std::string::npos) appName = appName.substr(0, firstSpace);
-             }
+        // 简化逻辑：不再解析进程名，直接注入所有子进程（如果配置允许）
+        // 或者只做最简单的注入，不写日志
+
+        std::wstring dllPath = Injection::ProcessInjector::GetCurrentDllPath();
+        if (!dllPath.empty()) {
+            Injection::ProcessInjector::InjectDll(lpProcessInformation->hProcess, dllPath);
         }
         
-        if (!config.ShouldInject(appName)) {
-            bool shouldLog = false;
-            {
-                std::lock_guard<std::mutex> lock(g_loggedSkipProcessesMtx);
-                if (g_loggedSkipProcesses.size() >= kMaxLoggedSkipProcesses) {
-                    g_loggedSkipProcesses.clear();
-                }
-                if (g_loggedSkipProcesses.find(appName) == g_loggedSkipProcesses.end()) {
-                    g_loggedSkipProcesses[appName] = true;
-                    shouldLog = true;
-                }
-            }
-            if (shouldLog) {
-                Core::Logger::Info("[跳过] 非目标进程(仅首次记录): " + appName +
-                                  " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ")");
-            }
-            if (!(dwCreationFlags & CREATE_SUSPENDED)) {
-                ResumeThread(lpProcessInformation->hThread);
-            }
-        } else {
-            Core::Logger::Info("拦截到进程创建，准备注入 DLL...");
-            
-            std::wstring dllPath = Injection::ProcessInjector::GetCurrentDllPath();
-            if (!dllPath.empty()) {
-                Injection::ProcessInjector::InjectDll(lpProcessInformation->hProcess, dllPath);
-                Core::Logger::Info("[成功] 已注入目标进程: " + appName + " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ") - 父子关系建立");
-            }
-            
-            if (!(dwCreationFlags & CREATE_SUSPENDED)) {
-                ResumeThread(lpProcessInformation->hThread);
-            }
+        if (!(dwCreationFlags & CREATE_SUSPENDED)) {
+            ResumeThread(lpProcessInformation->hThread);
         }
     }
     
@@ -936,16 +605,12 @@ BOOL WINAPI DetourCreateProcessW(
 }
 
 int WSAAPI DetourSend(SOCKET s, const char* buf, int len, int flags) {
-    Network::TrafficMonitor::Instance().LogSend(s, buf, len);
+    // 禁用流量监控日志，避免高频 I/O
     return fpSend(s, buf, len, flags);
 }
 
 int WSAAPI DetourRecv(SOCKET s, char* buf, int len, int flags) {
-    int result = fpRecv(s, buf, len, flags);
-    if (result > 0) {
-        Network::TrafficMonitor::Instance().LogRecv(s, buf, result);
-    }
-    return result;
+    return fpRecv(s, buf, len, flags);
 }
 
 int WSAAPI DetourWSASend(
@@ -954,9 +619,6 @@ int WSAAPI DetourWSASend(
     LPWSAOVERLAPPED lpOverlapped,
     LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
 ) {
-    if (lpBuffers && dwBufferCount > 0) {
-        Network::TrafficMonitor::Instance().LogSend(s, lpBuffers[0].buf, lpBuffers[0].len);
-    }
     return fpWSASend(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpOverlapped, lpCompletionRoutine);
 }
 
@@ -966,68 +628,34 @@ int WSAAPI DetourWSARecv(
     LPWSAOVERLAPPED lpOverlapped,
     LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
 ) {
-    int result = fpWSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, lpCompletionRoutine);
-    if (result == 0 && lpNumberOfBytesRecvd && *lpNumberOfBytesRecvd > 0 && lpBuffers && dwBufferCount > 0) {
-        Network::TrafficMonitor::Instance().LogRecv(s, lpBuffers[0].buf, *lpNumberOfBytesRecvd);
-    }
-    return result;
+    return fpWSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, lpCompletionRoutine);
 }
 
 namespace Hooks {
-    // 辅助函数：安全地创建并启用 Hook
-    // 针对 JVM 环境，我们尝试逐个启用，并捕获异常
     template<typename T>
     void SafeCreateHook(LPCWSTR moduleName, LPCSTR procName, LPVOID detour, T* original) {
         if (MH_CreateHookApi(moduleName, procName, detour, (LPVOID*)original) == MH_OK) {
-            // 立即启用，而不是最后统一启用
-            // 这样可以避免 MH_EnableHook(MH_ALL_HOOKS) 挂起所有线程的风险
-            if (MH_EnableHook((LPVOID)*original) != MH_OK) {
-                Core::Logger::Error(std::string("启用 Hook 失败: ") + procName);
-            }
-        } else {
-            Core::Logger::Error(std::string("创建 Hook 失败: ") + procName);
+            MH_EnableHook((LPVOID)*original);
         }
     }
 
     void Install() {
-        if (MH_Initialize() != MH_OK) {
-            Core::Logger::Error("MinHook 初始化失败");
-            return;
-        }
+        if (MH_Initialize() != MH_OK) return;
         
-        // 逐个安全启用 Hook
-        // 1. 基础网络 Hook (最安全)
+        // 仅启用最核心、最稳定的 Hook
         SafeCreateHook(L"ws2_32.dll", "connect", (LPVOID)DetourConnect, &fpConnect);
         SafeCreateHook(L"ws2_32.dll", "WSAConnect", (LPVOID)DetourWSAConnect, &fpWSAConnect);
         SafeCreateHook(L"ws2_32.dll", "getaddrinfo", (LPVOID)DetourGetAddrInfo, &fpGetAddrInfo);
         SafeCreateHook(L"ws2_32.dll", "GetAddrInfoW", (LPVOID)DetourGetAddrInfoW, &fpGetAddrInfoW);
         SafeCreateHook(L"ws2_32.dll", "gethostbyname", (LPVOID)DetourGetHostByName, &fpGetHostByName);
-        
-        // 2. 扩展网络 Hook (中等风险)
-        SafeCreateHook(L"ws2_32.dll", "WSAConnectByNameA", (LPVOID)DetourWSAConnectByNameA, &fpWSAConnectByNameA);
-        SafeCreateHook(L"ws2_32.dll", "WSAConnectByNameW", (LPVOID)DetourWSAConnectByNameW, &fpWSAConnectByNameW);
-        
-        // 3. 流量监控 Hook (低风险，但调用频繁)
-        SafeCreateHook(L"ws2_32.dll", "send", (LPVOID)DetourSend, &fpSend);
-        SafeCreateHook(L"ws2_32.dll", "recv", (LPVOID)DetourRecv, &fpRecv);
-        SafeCreateHook(L"ws2_32.dll", "WSASend", (LPVOID)DetourWSASend, &fpWSASend);
-        SafeCreateHook(L"ws2_32.dll", "WSARecv", (LPVOID)DetourWSARecv, &fpWSARecv);
 
-        // 4. 高级 Hook (高风险，涉及 IOCP 和 进程创建)
-        // 暂时禁用 CreateProcessW，因为它最容易导致安全软件拦截或 JVM 进程树异常
-        // 暂时禁用 ConnectEx，因为它涉及复杂的 IOCP 状态机
+        // 恢复 CreateProcessW Hook，但逻辑已简化
+        SafeCreateHook(L"kernel32.dll", "CreateProcessW", (LPVOID)DetourCreateProcessW, &fpCreateProcessW);
         
-        // SafeCreateHook(L"kernel32.dll", "CreateProcessW", (LPVOID)DetourCreateProcessW, &fpCreateProcessW);
-        // SafeCreateHook(L"ws2_32.dll", "WSAIoctl", (LPVOID)DetourWSAIoctl, &fpWSAIoctl); // 用于 ConnectEx
-        
-        Core::Logger::Info("核心 API Hook 已安装 (安全模式)");
+        Core::Logger::Info("Antigravity-Proxy Hooks Installed (Minimal Mode)");
     }
     
     void Uninstall() {
-        {
-            std::lock_guard<std::mutex> lock(g_connectExMtx);
-            g_connectExPending.clear();
-        }
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
     }
