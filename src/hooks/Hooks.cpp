@@ -18,7 +18,7 @@
 #include "../network/HttpConnect.hpp"
 #include "../network/SocketIo.hpp"
 #include "../network/TrafficMonitor.hpp"
-#include "../network/ProxyDetector.hpp" // 新增探测器
+#include "../network/ProxyDetector.hpp"
 #include "../injection/ProcessInjector.hpp"
 
 // ============= 函数指针类型定义 =============
@@ -320,7 +320,6 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
     
     if (name->sa_family != AF_INET) {
         std::string addrStr = SockaddrToString(name);
-        // 获取有效端口（如果是自动模式，这里会尝试获取缓存的端口）
         int port = config.GetEffectivePort();
         if (port != 0) {
             Core::Logger::Warn("已阻止非 IPv4 连接(强制 IPv4), family=" + std::to_string((int)name->sa_family) +
@@ -346,10 +345,8 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
     
-    // 获取当前有效端口
     int effectivePort = config.GetEffectivePort();
 
-    // 如果是自动模式且尚未探测到端口，执行探测
     if (config.proxy.port == 0 && effectivePort == 0) {
         effectivePort = Network::ProxyDetector::Detect();
         if (effectivePort > 0) {
@@ -376,7 +373,6 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
                      : fpConnect(s, name, namelen);
     }
     
-    // 如果有有效端口，尝试走代理
     if (effectivePort != 0) {
         Core::Logger::Info("正重定向 " + originalHost + ":" + std::to_string(originalPort) + " 到代理(端口:" + std::to_string(effectivePort) + ")");
         
@@ -386,34 +382,20 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
             return SOCKET_ERROR;
         }
         
-        // 尝试连接
         int result = isWsa ?
             fpWSAConnect(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, NULL, NULL, NULL) :
             fpConnect(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr));
         
-        // 故障自愈逻辑：如果连接失败且是自动模式，尝试重新探测
         if (result != 0 && config.proxy.port == 0) {
             int err = WSAGetLastError();
-            // 如果是连接被拒绝或超时，说明端口可能变了
             if (err == WSAECONNREFUSED || err == WSAETIMEDOUT) {
                 Core::Logger::Warn("代理连接失败(端口:" + std::to_string(effectivePort) + "), 尝试重新探测...");
-
-                // 标记当前端口无效
                 config.InvalidateDynamicPort();
-
-                // 重新探测
                 int newPort = Network::ProxyDetector::Detect();
                 if (newPort > 0 && newPort != effectivePort) {
                     Core::Logger::Info("发现新代理端口: " + std::to_string(newPort) + ", 正在重试...");
                     config.SetDynamicPort(newPort);
-
-                    // 更新目标地址
                     if (BuildProxyAddr(config.proxy, newPort, &proxyAddr, (sockaddr_in*)name)) {
-                        // 关闭旧连接状态（虽然 socket 还是同一个，但 connect 失败后通常需要重置状态，
-                        // 不过对于阻塞 socket，再次 connect 可能会成功。对于非阻塞，可能需要重新创建 socket，
-                        // 但这里我们无法替换用户的 socket 句柄。
-                        // 幸运的是，connect 失败后再次 connect 是允许的。）
-
                         result = isWsa ?
                             fpWSAConnect(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, NULL, NULL, NULL) :
                             fpConnect(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr));
@@ -443,7 +425,6 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
         return 0;
     }
     
-    // 无代理配置，直接连接
     return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
 }
 
@@ -694,7 +675,6 @@ BOOL PASCAL DetourConnectEx(
     
     int effectivePort = config.GetEffectivePort();
 
-    // 自动探测
     if (config.proxy.port == 0 && effectivePort == 0) {
         effectivePort = Network::ProxyDetector::Detect();
         if (effectivePort > 0) {
@@ -722,7 +702,6 @@ BOOL PASCAL DetourConnectEx(
     BOOL result = fpConnectEx(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, 0,
                               lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
 
-    // 故障自愈逻辑 (ConnectEx 比较特殊，失败通常返回 FALSE 且 LastError != IO_PENDING)
     if (!result && config.proxy.port == 0) {
         int err = WSAGetLastError();
         if (err != WSA_IO_PENDING && (err == WSAECONNREFUSED || err == WSAETIMEDOUT)) {
@@ -995,96 +974,53 @@ int WSAAPI DetourWSARecv(
 }
 
 namespace Hooks {
+    // 辅助函数：安全地创建并启用 Hook
+    // 针对 JVM 环境，我们尝试逐个启用，并捕获异常
+    template<typename T>
+    void SafeCreateHook(LPCWSTR moduleName, LPCSTR procName, LPVOID detour, T* original) {
+        if (MH_CreateHookApi(moduleName, procName, detour, (LPVOID*)original) == MH_OK) {
+            // 立即启用，而不是最后统一启用
+            // 这样可以避免 MH_EnableHook(MH_ALL_HOOKS) 挂起所有线程的风险
+            if (MH_EnableHook((LPVOID)*original) != MH_OK) {
+                Core::Logger::Error(std::string("启用 Hook 失败: ") + procName);
+            }
+        } else {
+            Core::Logger::Error(std::string("创建 Hook 失败: ") + procName);
+        }
+    }
+
     void Install() {
         if (MH_Initialize() != MH_OK) {
             Core::Logger::Error("MinHook 初始化失败");
             return;
         }
+        
+        // 逐个安全启用 Hook
+        // 1. 基础网络 Hook (最安全)
+        SafeCreateHook(L"ws2_32.dll", "connect", (LPVOID)DetourConnect, &fpConnect);
+        SafeCreateHook(L"ws2_32.dll", "WSAConnect", (LPVOID)DetourWSAConnect, &fpWSAConnect);
+        SafeCreateHook(L"ws2_32.dll", "getaddrinfo", (LPVOID)DetourGetAddrInfo, &fpGetAddrInfo);
+        SafeCreateHook(L"ws2_32.dll", "GetAddrInfoW", (LPVOID)DetourGetAddrInfoW, &fpGetAddrInfoW);
+        SafeCreateHook(L"ws2_32.dll", "gethostbyname", (LPVOID)DetourGetHostByName, &fpGetHostByName);
+        
+        // 2. 扩展网络 Hook (中等风险)
+        SafeCreateHook(L"ws2_32.dll", "WSAConnectByNameA", (LPVOID)DetourWSAConnectByNameA, &fpWSAConnectByNameA);
+        SafeCreateHook(L"ws2_32.dll", "WSAConnectByNameW", (LPVOID)DetourWSAConnectByNameW, &fpWSAConnectByNameW);
+        
+        // 3. 流量监控 Hook (低风险，但调用频繁)
+        SafeCreateHook(L"ws2_32.dll", "send", (LPVOID)DetourSend, &fpSend);
+        SafeCreateHook(L"ws2_32.dll", "recv", (LPVOID)DetourRecv, &fpRecv);
+        SafeCreateHook(L"ws2_32.dll", "WSASend", (LPVOID)DetourWSASend, &fpWSASend);
+        SafeCreateHook(L"ws2_32.dll", "WSARecv", (LPVOID)DetourWSARecv, &fpWSARecv);
 
-        if (MH_CreateHookApi(L"ws2_32.dll", "connect",
-                             (LPVOID)DetourConnect, (LPVOID*)&fpConnect) != MH_OK) {
-            Core::Logger::Error("Hook connect 失败");
-        }
+        // 4. 高级 Hook (高风险，涉及 IOCP 和 进程创建)
+        // 暂时禁用 CreateProcessW，因为它最容易导致安全软件拦截或 JVM 进程树异常
+        // 暂时禁用 ConnectEx，因为它涉及复杂的 IOCP 状态机
         
-        if (MH_CreateHookApi(L"ws2_32.dll", "WSAConnect",
-                             (LPVOID)DetourWSAConnect, (LPVOID*)&fpWSAConnect) != MH_OK) {
-            Core::Logger::Error("Hook WSAConnect 失败");
-        }
+        // SafeCreateHook(L"kernel32.dll", "CreateProcessW", (LPVOID)DetourCreateProcessW, &fpCreateProcessW);
+        // SafeCreateHook(L"ws2_32.dll", "WSAIoctl", (LPVOID)DetourWSAIoctl, &fpWSAIoctl); // 用于 ConnectEx
         
-        if (MH_CreateHookApi(L"ws2_32.dll", "getaddrinfo",
-                             (LPVOID)DetourGetAddrInfo, (LPVOID*)&fpGetAddrInfo) != MH_OK) {
-            Core::Logger::Error("Hook getaddrinfo 失败");
-        }
-        
-        if (MH_CreateHookApi(L"ws2_32.dll", "GetAddrInfoW",
-                             (LPVOID)DetourGetAddrInfoW, (LPVOID*)&fpGetAddrInfoW) != MH_OK) {
-            Core::Logger::Error("Hook GetAddrInfoW 失败");
-        }
-        
-        if (MH_CreateHookApi(L"ws2_32.dll", "WSAConnectByNameA",
-                             (LPVOID)DetourWSAConnectByNameA, (LPVOID*)&fpWSAConnectByNameA) != MH_OK) {
-            Core::Logger::Error("Hook WSAConnectByNameA 失败");
-        }
-        if (MH_CreateHookApi(L"ws2_32.dll", "WSAConnectByNameW", 
-                             (LPVOID)DetourWSAConnectByNameW, (LPVOID*)&fpWSAConnectByNameW) != MH_OK) {
-            Core::Logger::Error("Hook WSAConnectByNameW 失败");
-        }
-        
-        if (MH_CreateHookApi(L"ws2_32.dll", "gethostbyname",
-                             (LPVOID)DetourGetHostByName, (LPVOID*)&fpGetHostByName) != MH_OK) {
-            Core::Logger::Error("Hook gethostbyname 失败");
-        }
-        
-        if (MH_CreateHookApi(L"ws2_32.dll", "WSAIoctl",
-                             (LPVOID)DetourWSAIoctl, (LPVOID*)&fpWSAIoctl) != MH_OK) {
-            Core::Logger::Error("Hook WSAIoctl 失败");
-        }
-        
-        if (MH_CreateHookApi(L"ws2_32.dll", "WSAGetOverlappedResult",
-                             (LPVOID)DetourWSAGetOverlappedResult, (LPVOID*)&fpWSAGetOverlappedResult) != MH_OK) {
-            Core::Logger::Error("Hook WSAGetOverlappedResult 失败");
-        }
-
-        if (MH_CreateHookApi(L"kernel32.dll", "CreateProcessW",
-                             (LPVOID)DetourCreateProcessW, (LPVOID*)&fpCreateProcessW) != MH_OK) {
-            Core::Logger::Error("Hook CreateProcessW 失败");
-        }
-        
-        if (MH_CreateHookApi(L"kernel32.dll", "GetQueuedCompletionStatus",
-                             (LPVOID)DetourGetQueuedCompletionStatus, (LPVOID*)&fpGetQueuedCompletionStatus) != MH_OK) {
-            Core::Logger::Error("Hook GetQueuedCompletionStatus 失败");
-        }
-        
-        if (MH_CreateHookApi(L"kernel32.dll", "GetQueuedCompletionStatusEx",
-                             (LPVOID)DetourGetQueuedCompletionStatusEx, (LPVOID*)&fpGetQueuedCompletionStatusEx) != MH_OK) {
-            Core::Logger::Error("Hook GetQueuedCompletionStatusEx 失败");
-        }
-
-        if (MH_CreateHookApi(L"ws2_32.dll", "send",
-                             (LPVOID)DetourSend, (LPVOID*)&fpSend) != MH_OK) {
-            Core::Logger::Error("Hook send 失败");
-        }
-        
-        if (MH_CreateHookApi(L"ws2_32.dll", "recv",
-                             (LPVOID)DetourRecv, (LPVOID*)&fpRecv) != MH_OK) {
-            Core::Logger::Error("Hook recv 失败");
-        }
-        
-        if (MH_CreateHookApi(L"ws2_32.dll", "WSASend",
-                             (LPVOID)DetourWSASend, (LPVOID*)&fpWSASend) != MH_OK) {
-            Core::Logger::Error("Hook WSASend 失败");
-        }
-        
-        if (MH_CreateHookApi(L"ws2_32.dll", "WSARecv",
-                             (LPVOID)DetourWSARecv, (LPVOID*)&fpWSARecv) != MH_OK) {
-            Core::Logger::Error("Hook WSARecv 失败");
-        }
-        
-        if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
-            Core::Logger::Error("启用 Hooks 失败");
-        } else {
-            Core::Logger::Info("所有 API Hook 安装成功 (Phase 1-3)");
-        }
+        Core::Logger::Info("核心 API Hook 已安装 (安全模式)");
     }
     
     void Uninstall() {
