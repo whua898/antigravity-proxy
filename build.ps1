@@ -25,7 +25,7 @@ param(
 # ============================================================
 # 版本信息 (在此处统一管理版本号)
 # ============================================================
-$Version = "1.1.0"
+$Version = "1.4.1"
 
 # ============================================================
 # 辅助函数
@@ -253,7 +253,7 @@ $configJson = @{
     }
     proxy = @{
         host = "127.0.0.1"
-        port = 7890
+        port = 0
         type = "socks5"
     }
     fake_ip = @{
@@ -307,7 +307,7 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
 {
     "proxy": {
         "host": "127.0.0.1",       // 代理服务器地址
-        "port": 7890,              // 代理服务器端口
+        "port": 0,                 // 代理服务器端口 (0=自动探测)
         "type": "socks5"           // 代理类型: socks5 或 http
     },
     "fake_ip": {
@@ -334,15 +334,15 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
 
 #### 常用代理软件端口参考
 
-| 代理软件 | SOCKS5 端口 | HTTP 端口 | 混合端口 | 说明 |
-|----------|-------------|-----------|----------|------|
-| Clash / Clash Verge | 7891 | 7890 | 7890 | 混合端口同时支持 SOCKS5 和 HTTP |
-| Clash for Windows | 7891 | 7890 | 7890 | 设置 → Ports 查看 |
-| Mihomo (Clash Meta) | 7891 | 7890 | 7890 | 配置同 Clash |
-| V2RayN | 10808 | 10809 | - | 设置 → Core 基础设置 |
-| Shadowsocks | 1080 | - | - | 仅 SOCKS5 |
-| Surge | 6153 | 6152 | - | Mac/iOS |
-| Qv2ray | 1089 | 8889 | - | 首选项 → 入站设置 |
+|       代理软件       | SOCKS5 端口 | HTTP 端口 | 混合端口 |          说明                |
+|---------------------|------------|----------|---------|-----------------------------|
+| Clash / Clash Verge |   7891     |   7890    |  7890  | 混合端口同时支持 SOCKS5 和 HTTP |
+| Clash for Windows   |   7891     |   7890    |  7890  | 设置 → Ports 查看             |
+| Mihomo (Clash Meta) |   7891     |   7890    |  7890  | 配置同 Clash                  |
+| V2RayN              |   10808    |   10809   |    -   | 设置 → Core 基础设置           |
+| Shadowsocks         |   1080     |   -       |    -   | 仅 SOCKS5                    |
+| Surge               |   6153     |   6152    |    -   | Mac/iOS                     |
+| Qv2ray              |   1089     |   8889    |    -   | 首选项 → 入站设置              |
 
 > **提示**: 推荐使用 SOCKS5 协议，本工具对其支持更完善。
 
@@ -357,42 +357,39 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 
 ## 配置文件说明
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| proxy.host | 代理服务器地址 | 127.0.0.1 |
-| proxy.port | 代理服务器端口 | 7890 |
-| proxy.type | 代理类型 (socks5/http) | socks5 |
-| fake_ip.enabled | 是否启用 FakeIP 系统 | true |
-| fake_ip.cidr | 虚拟 IP 地址范围 | 198.18.0.0/15 |
-| timeout.connect | 连接超时 (毫秒) | 5000 |
-| timeout.send | 发送超时 (毫秒) | 5000 |
-| timeout.recv | 接收超时 (毫秒) | 5000 |
-| traffic_logging | 是否记录流量日志 | false |
-| child_injection | 是否注入子进程 | true |
-| target_processes | 目标进程列表 (空=全部) | [] |
-| proxy_rules.allowed_ports | 端口白名单 (空=全部) | [80, 443] |
-| proxy_rules.dns_mode | DNS策略 (direct/proxy) | direct |
+|    配置项                  |    说明               |   默认值        |
+| :------------------------ | :------------------- | :------------- |
+| proxy.host                | 代理服务器地址          | 127.0.0.1     |
+| proxy.port                | 代理服务器端口          | 0 (自动探测)    |
+| proxy.type                | 代理类型 (socks5/http) | socks5        |
+| fake_ip.enabled           | 是否启用 FakeIP 系统    | true          |
+| fake_ip.cidr              | 虚拟 IP 地址范围        | 198.18.0.0/15 |
+| timeout.connect           | 连接超时 (毫秒)         | 5000          |
+| timeout.send              | 发送超时 (毫秒)         | 5000          |
+| timeout.recv              | 接收超时 (毫秒)         | 5000          |
+| traffic_logging           | 是否记录流量日志         | false         |
+| child_injection           | 是否注入子进程           | true         |
+| target_processes          | 目标进程列表 (空=全部)    | []           |
+| proxy_rules.allowed_ports | 端口白名单 (空=全部)     | [80, 443]     |
+| proxy_rules.dns_mode      | DNS策略 (direct/proxy) | direct       |
 
-## v1.1.0 更新说明
+## v1.4.1 更新说明
 
 ### 新增功能
-1. **目标进程过滤**: 可配置 `target_processes` 数组，仅对指定进程注入 DLL
-2. **回环地址 bypass**: `127.0.0.1`、`localhost` 等本地地址不再走代理
-3. **日志中文化**: 所有日志已统一为中文输出
-4. **智能路由规则**: 新增 `proxy_rules` 配置，支持端口白名单和 DNS 策略
-   - `allowed_ports`: 仅指定端口走代理，其他直连
-   - `dns_mode`: DNS (53端口) 可选直连或走代理
+1. **智能代理探测**: `proxy.port` 设为 `0` 时，自动扫描常用端口 (Clash/V2Ray等) 或读取环境变量
+2. **故障自愈**: 代理端口变更或连接失败时，自动重新探测并重连，支持代理软件热切换
+3. **注入稳定性增强**: 强制挂起子进程注入，彻底解决注入失败问题
+4. **日志性能优化**: 优化文件写入逻辑，减少性能损耗
 
 ### 配置示例
 ```json
 {
-    "target_processes": [
-        "language_server_windows",
-        "Antigravity.exe"
-    ]
+    "proxy": {
+        "port": 0
+    }
 }
 ```
-如果 `target_processes` 为空数组或不存在，则注入所有子进程(原行为)。
+设置为 0 即可开启自动探测模式。
 
 ## 日志文件
 DLL 运行时会在当前目录生成 `proxy.log` 日志文件，用于调试。
