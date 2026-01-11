@@ -20,6 +20,8 @@ inline bool WaitReadable(SOCKET sock, int timeoutMs) {
     timeval tv{};
     tv.tv_sec = timeoutMs / 1000;
     tv.tv_usec = (timeoutMs % 1000) * 1000;
+    // 注意：select 可能会修改 tv，虽然 Windows 上通常不修改，但标准建议重置
+    // 这里是单次调用，所以没问题
     int rc = select(0, &readSet, nullptr, nullptr, &tv);
     if (rc > 0) return true;
     if (rc == 0) WSASetLastError(WSAETIMEDOUT);
