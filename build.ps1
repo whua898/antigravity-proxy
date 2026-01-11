@@ -335,14 +335,14 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
 #### 常用代理软件端口参考
 
 |       代理软件       | SOCKS5 端口 | HTTP 端口 | 混合端口 |          说明                |
-|---------------------|------------|----------|---------|-----------------------------|
-| Clash / Clash Verge |   7891     |   7890    |  7890  | 混合端口同时支持 SOCKS5 和 HTTP |
-| Clash for Windows   |   7891     |   7890    |  7890  | 设置 → Ports 查看             |
-| Mihomo (Clash Meta) |   7891     |   7890    |  7890  | 配置同 Clash                  |
-| V2RayN              |   10808    |   10809   |    -   | 设置 → Core 基础设置           |
-| Shadowsocks         |   1080     |   -       |    -   | 仅 SOCKS5                    |
-| Surge               |   6153     |   6152    |    -   | Mac/iOS                     |
-| Qv2ray              |   1089     |   8889    |    -   | 首选项 → 入站设置              |
+|---------------------|-------------|-----------|--------|-------------------------------|
+| Clash / Clash Verge |    7891     |   7890    |  7890  | 混合端口同时支持 SOCKS5 和 HTTP |
+| Clash for Windows   |    7891     |   7890    |  7890  | 设置 → Ports 查看              |
+| Mihomo (Clash Meta) |    7891     |   7890    |  7890  | 配置同 Clash                   |
+| V2RayN              |    10808    |   10809   |    -   | 设置 → Core 基础设置           |
+| Shadowsocks         |    1080     |   -       |    -   | 仅 SOCKS5                     |
+| Surge               |    6153     |   6152    |    -   | Mac/iOS                       |
+| Qv2ray              |    1089     |   8889    |    -   | 首选项 → 入站设置              |
 
 > **提示**: 推荐使用 SOCKS5 协议，本工具对其支持更完善。
 
@@ -357,21 +357,21 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 
 ## 配置文件说明
 
-|    配置项                  |    说明               |   默认值        |
-| :------------------------ | :------------------- | :------------- |
+|    配置项                  |     说明               |   默认值       |
+| :------------------------ | :--------------------- | :------------- |
 | proxy.host                | 代理服务器地址          | 127.0.0.1     |
-| proxy.port                | 代理服务器端口          | 0 (自动探测)    |
-| proxy.type                | 代理类型 (socks5/http) | socks5        |
+| proxy.port                | 代理服务器端口          | 0 (自动探测)   |
+| proxy.type                | 代理类型 (socks5/http) | socks5         |
 | fake_ip.enabled           | 是否启用 FakeIP 系统    | true          |
 | fake_ip.cidr              | 虚拟 IP 地址范围        | 198.18.0.0/15 |
 | timeout.connect           | 连接超时 (毫秒)         | 5000          |
 | timeout.send              | 发送超时 (毫秒)         | 5000          |
 | timeout.recv              | 接收超时 (毫秒)         | 5000          |
-| traffic_logging           | 是否记录流量日志         | false         |
-| child_injection           | 是否注入子进程           | true         |
-| target_processes          | 目标进程列表 (空=全部)    | []           |
-| proxy_rules.allowed_ports | 端口白名单 (空=全部)     | [80, 443]     |
-| proxy_rules.dns_mode      | DNS策略 (direct/proxy) | direct       |
+| traffic_logging           | 是否记录流量日志        | false         |
+| child_injection           | 是否注入子进程          | true          |
+| target_processes          | 目标进程列表 (空=全部)  | []            |
+| proxy_rules.allowed_ports | 端口白名单 (空=全部)    | [80, 443]     |
+| proxy_rules.dns_mode      | DNS策略 (direct/proxy) | direct        |
 
 ## v1.4.1 更新说明
 
