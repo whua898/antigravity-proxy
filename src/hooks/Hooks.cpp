@@ -851,11 +851,12 @@ BOOL WINAPI DetourCreateProcessW(
 ) {
     auto& config = Core::Config::Instance();
     
-    // 添加 CREATE_SUSPENDED 标志以便注入
+    // 优化：无论原始标志如何，只要配置开启注入，就强制挂起进程
+    // 这样可以确保在子进程执行任何代码前完成注入，避免竞态条件
     DWORD modifiedFlags = dwCreationFlags;
-    bool needInject = config.childInjection && !(dwCreationFlags & CREATE_SUSPENDED);
+    bool shouldInject = config.childInjection;
     
-    if (needInject) {
+    if (shouldInject) {
         modifiedFlags |= CREATE_SUSPENDED;
     }
     
@@ -868,7 +869,7 @@ BOOL WINAPI DetourCreateProcessW(
         lpStartupInfo, lpProcessInformation
     );
     
-    if (result && needInject && lpProcessInformation) {
+    if (result && shouldInject && lpProcessInformation) {
         // 先提取进程名用于过滤检查
         std::string appName = "Unknown";
         LPCWSTR targetStr = lpApplicationName ? lpApplicationName : lpCommandLine;
@@ -908,7 +909,7 @@ BOOL WINAPI DetourCreateProcessW(
                 Core::Logger::Info("[跳过] 非目标进程(仅首次记录): " + appName +
                                   " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ")");
             }
-            // 恢复进程（不注入）
+            // 只有当原始调用者没有要求挂起时，我们才恢复
             if (!(dwCreationFlags & CREATE_SUSPENDED)) {
                 ResumeThread(lpProcessInformation->hThread);
             }
@@ -922,7 +923,7 @@ BOOL WINAPI DetourCreateProcessW(
                 Core::Logger::Info("[成功] 已注入目标进程: " + appName + " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ") - 父子关系建立");
             }
             
-            // 如果原始调用没有要求挂起，则恢复进程
+            // 只有当原始调用者没有要求挂起时，我们才恢复
             if (!(dwCreationFlags & CREATE_SUSPENDED)) {
                 ResumeThread(lpProcessInformation->hThread);
             }

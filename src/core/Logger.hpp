@@ -16,6 +16,20 @@
 namespace Core {
     class Logger {
     private:
+        std::ofstream m_logFile;
+        std::string m_currentLogPath;
+        std::mutex m_mtx;
+        ULONGLONG m_lastCheckTick = 0;
+        bool m_dropForToday = false;
+
+        // 单例模式
+        Logger() {}
+        ~Logger() {
+            if (m_logFile.is_open()) {
+                m_logFile.close();
+            }
+        }
+
         // ========== 日志目录相关函数 ==========
         
         // 获取 DLL 所在目录（用于定位日志目录）
@@ -96,7 +110,7 @@ namespace Core {
             return s_logDir;
         }
 
-        // ========== 原有辅助函数 ==========
+        // ========== 辅助函数 ==========
         
         static std::string GetTimestamp() {
             auto now = std::time(nullptr);
@@ -174,59 +188,76 @@ namespace Core {
             DeleteFileA(oldLog1.c_str());
         }
 
-        static void WriteToFile(const std::string& message) {
-            static std::mutex mtx;
-            std::lock_guard<std::mutex> lock(mtx);
-            // 按日期写日志并清理旧文件，避免历史日志堆积
-            static std::string s_todayLog;
-            static ULONGLONG s_lastCheckTick = 0;
-            static bool s_dropForToday = false;
+        void WriteImpl(const std::string& message) {
+            std::lock_guard<std::mutex> lock(m_mtx);
+
             static const ULONGLONG kMaxLogBytes = 100ull * 1024 * 1024; // 100MB
             static const ULONGLONG kCheckIntervalMs = 60ull * 60 * 1000; // 1 小时
+
             std::string todayLog = GetTodayLogName();
-            if (s_todayLog != todayLog) {
-                s_todayLog = todayLog;
-                s_lastCheckTick = 0;
-                s_dropForToday = false;
-                CleanupOldLogs(s_todayLog);
+
+            // 如果日期变更，或者文件未打开，或者路径不一致，则重新打开
+            if (!m_logFile.is_open() || m_currentLogPath != todayLog) {
+                if (m_logFile.is_open()) {
+                    m_logFile.close();
+                }
+                m_currentLogPath = todayLog;
+                m_lastCheckTick = 0;
+                m_dropForToday = false;
+                CleanupOldLogs(m_currentLogPath);
+
+                // 以追加模式打开
+                m_logFile.open(m_currentLogPath, std::ios::app);
             }
-            if (s_dropForToday) {
+
+            if (m_dropForToday) {
                 return;
             }
+
             ULONGLONG nowTick = GetTickCount64();
-            if (s_lastCheckTick == 0 || nowTick - s_lastCheckTick >= kCheckIntervalMs) {
-                s_lastCheckTick = nowTick;
-                if (IsLogOverLimit(s_todayLog, kMaxLogBytes)) {
+            if (m_lastCheckTick == 0 || nowTick - m_lastCheckTick >= kCheckIntervalMs) {
+                m_lastCheckTick = nowTick;
+                if (IsLogOverLimit(m_currentLogPath, kMaxLogBytes)) {
                     // 当天日志超过上限后直接丢弃，次日恢复
-                    s_dropForToday = true;
+                    m_dropForToday = true;
+                    if (m_logFile.is_open()) {
+                        m_logFile << "[系统] 日志文件大小超过限制，今日停止记录。\n";
+                        m_logFile.close();
+                    }
                     return;
                 }
             }
-            std::ofstream logFile(s_todayLog, std::ios::app);
-            if (logFile.is_open()) {
-                logFile << message << "\n";
+
+            if (m_logFile.is_open()) {
+                m_logFile << message << "\n";
+                m_logFile.flush(); // 确保实时写入，防止崩溃时丢失关键日志
             }
         }
 
     public:
+        static Logger& Instance() {
+            static Logger instance;
+            return instance;
+        }
+
         static void Log(const std::string& message) {
-            WriteToFile("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " " + message);
+            Instance().WriteImpl("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " " + message);
         }
 
         static void Error(const std::string& message) {
-            WriteToFile("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " [错误] " + message);
+            Instance().WriteImpl("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " [错误] " + message);
         }
 
         static void Info(const std::string& message) {
-            WriteToFile("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " [信息] " + message);
+            Instance().WriteImpl("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " [信息] " + message);
         }
 
         static void Warn(const std::string& message) {
-            WriteToFile("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " [警告] " + message);
+            Instance().WriteImpl("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " [警告] " + message);
         }
 
         static void Debug(const std::string& message) {
-            WriteToFile("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " [调试] " + message);
+            Instance().WriteImpl("[" + GetTimestamp() + "] " + GetPidTidPrefix() + " [调试] " + message);
         }
     };
 }
