@@ -20,18 +20,21 @@ namespace VersionProxy {
 }
 
 // 初始化线程函数
-// 将 Hook 安装移出 DllMain，避免 Loader Lock 导致的死锁或初始化失败 (如 os error 1114)
 void InitializationThread() {
-    // 稍微延迟一下，确保宿主进程的主要模块已加载
-    Sleep(100);
+    // 针对 PyCharm/JVM 的特殊优化：
+    // JVM 启动初期极其脆弱，任何对内存/线程的修改都可能导致 crash 或 1114 错误。
+    // 我们给予 1000ms 的"安全窗口"，让 JVM 完成核心初始化 (加载 jvm.dll, 初始化 GC 等)。
+    // 对于 IDE 插件代理来说，这个延迟是完全可以接受的。
+    Sleep(1000);
 
     // 加载配置
     Core::Config::Instance().Load("config.json");
 
     // 安装 Hooks
+    // 注意：MinHook 内部会挂起线程，这在 JVM 环境下仍有风险，但延迟 1s 后风险大幅降低
     Hooks::Install();
 
-    Core::Logger::Info("Antigravity-Proxy 初始化完成 (Thread Mode)");
+    Core::Logger::Info("Antigravity-Proxy 初始化完成 (Delayed 1000ms)");
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
@@ -39,26 +42,25 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hinstDLL);
 
-        // VersionProxy 采用懒加载模式，此处仅做占位
+        // VersionProxy 懒加载
         VersionProxy::Initialize();
         
-        // 关键修正：不要在 DllMain 中直接安装 Hook
-        // PyCharm/JVM 等复杂应用在加载 DLL 时非常敏感，直接 Hook 易导致 ERROR_DLL_INIT_FAILED
-        // 创建一个线程来异步执行初始化
+        // 启动异步初始化线程
         {
             HANDLE hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InitializationThread, NULL, 0, NULL);
             if (hThread) {
                 CloseHandle(hThread);
-            } else {
-                // 如果线程创建失败，回退到同步尝试（虽然风险大，但总比什么都不做强）
-                InitializationThread();
             }
         }
         break;
         
     case DLL_PROCESS_DETACH:
-        Hooks::Uninstall();
-        VersionProxy::Uninitialize();
+        // 卸载时也要小心，避免在 JVM 卸载过程中 crash
+        // 简单起见，如果进程正在退出，可能不需要显式卸载 Hook
+        if (lpvReserved == NULL) { // FreeLibrary 调用
+            Hooks::Uninstall();
+            VersionProxy::Uninitialize();
+        }
         break;
     }
     return TRUE;
