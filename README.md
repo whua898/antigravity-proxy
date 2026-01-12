@@ -163,14 +163,14 @@ curl -x http://127.0.0.1:7890 https://www.google.com -I
 ### Step 2: 准备文件 / Get the Files
 
 准备两份文件：
-- `version.dll`
+- `winmm.dll`
 - `config.json`
 
 （可以从 Release 下载，或自行编译生成。）
 
 ### Step 3: 部署到 Antigravity / Deploy to Antigravity
 
-把 `version.dll` 和 `config.json` 复制到 **Antigravity 主程序目录**（与 `Antigravity.exe` 同级）。然后启动 Antigravity，搞定。
+把 `winmm.dll` 和 `config.json` 复制到 **Antigravity 主程序目录**（与 `Antigravity.exe` 同级）。然后启动 Antigravity，搞定。
 
 #### Windows 常见目录 + 快速跳转
 
@@ -207,13 +207,13 @@ setx ANTIGRAVITY_HOME "%LOCALAPPDATA%\Programs\Antigravity"
 
 | 错误码 | 问题描述 | 可能原因 | 解决方案 |
 |--------|----------|----------|----------|
-| `0xC0000142` | 应用程序无法正常启动（已知：部分环境使用 x64 版本会出现此错误，切换到 x86 版本可以正常运行） | 架构不兼容（目标程序为 x86，但放入了 x64 的 `version.dll`）<br>依赖库缺失或版本不匹配（常见：VC++ 运行库未安装/版本不一致）<br>安全软件拦截/隔离导致初始化失败 | 使用与目标程序一致的版本（x86 程序用 x86，x64 程序用 x64）<br>安装对应架构的 VC++ 2015-2022 运行库（尤其是 x64）<br>尝试使用静态运行库构建：`.\build.ps1 -StaticRuntime` |
+| `0xC0000142` | 应用程序无法正常启动（已知：部分环境使用 x64 版本会出现此错误，切换到 x86 版本可以正常运行） | 架构不兼容（目标程序为 x86，但放入了 x64 的 `winmm.dll`）<br>依赖库缺失或版本不匹配（常见：VC++ 运行库未安装/版本不一致）<br>安全软件拦截/隔离导致初始化失败 | 使用与目标程序一致的版本（x86 程序用 x86，x64 程序用 x64）<br>安装对应架构的 VC++ 2015-2022 运行库（尤其是 x64）<br>尝试使用静态运行库构建：`.\build.ps1 -StaticRuntime` |
 
 ### 其他常见错误码
 
 | 错误码 | 问题描述 | 可能原因 | 解决方案 |
 |--------|----------|----------|----------|
-| `0xC000007B` | 应用程序无法正常启动（常见于位数不匹配） | `version.dll` 与目标程序位数不一致（x86/x64 混用）<br>依赖 DLL 位数不一致或文件损坏 | 确保 `version.dll` 与目标程序位数一致，并替换为对应版本产物<br>清理目标目录中可能残留的旧 DLL 后重试 |
+| `0xC000007B` | 应用程序无法正常启动（常见于位数不匹配） | `winmm.dll` 与目标程序位数不一致（x86/x64 混用）<br>依赖 DLL 位数不一致或文件损坏 | 确保 `winmm.dll` 与目标程序位数一致，并替换为对应版本产物<br>清理目标目录中可能残留的旧 DLL 后重试 |
 | `0xC0000135` | 找不到组件/缺少 DLL，程序无法启动 | 依赖库缺失（常见：VC++ 运行库 DLL 缺失）<br>依赖库被安全软件删除/隔离 | 安装对应架构的 VC++ 2015-2022 运行库<br>或使用静态运行库构建：`.\build.ps1 -StaticRuntime` |
 | `VCRUNTIME140_1.dll 缺失` | 启动时报“找不到 VCRUNTIME140_1.dll” | VC++ 2015-2022 运行库未安装或被安全软件删除 | 安装对应架构的 VC++ 2015-2022 运行库（x64/x86）<br>或使用静态运行库构建：`.\build.ps1 -StaticRuntime` |
 | `0xC0000906` | 应用程序无法正常启动 | 文件被安全软件拦截/隔离<br>文件不完整或已损坏 | 重新获取/重新编译 DLL 并替换<br>将目标程序目录加入安全软件白名单/排除项后重试 |
@@ -270,7 +270,7 @@ setx ANTIGRAVITY_HOME "%LOCALAPPDATA%\Programs\Antigravity"
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 1. DLL 劫持 (DLL Hijacking)                                              │
-│    程序加载 version.dll → 加载我们的 DLL → 转发真实 version.dll 调用      │
+│    程序加载 winmm.dll → 加载我们的 DLL → 转发真实 winmm.dll 调用      │
 └─────────────────────────────────────────────────────────────────────────┘
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -365,7 +365,7 @@ cmake .. -G "Visual Studio 17 2022" -A x64
 # 编译 Release 版本
 cmake --build . --config Release
 
-# 输出: version.dll
+# 输出: winmm.dll
 
 
 # ========== x86 (32位) ==========
@@ -377,7 +377,7 @@ cmake .. -G "Visual Studio 17 2022" -A Win32
 # 编译
 cmake --build . --config Release
 
-# 输出: version.dll
+# 输出: winmm.dll
 ```
 
 ### 常见编译错误 / Common Build Errors
@@ -425,7 +425,7 @@ curl -o include/nlohmann/json.hpp https://raw.githubusercontent.com/nlohmann/jso
 **解决方案**:
 确保 CMakeLists.txt 中包含:
 ```cmake
-target_link_libraries(version PRIVATE ws2_32)
+target_link_libraries(winmm PRIVATE ws2_32)
 ```
 </details>
 
@@ -440,7 +440,7 @@ target_link_libraries(version PRIVATE ws2_32)
 #### Step 1: 准备文件 / Prepare Files
 
 编译完成后，你会在 `output` 目录得到：
-- `version.dll` - 代理 DLL
+- `winmm.dll` - 代理 DLL
 - `config.json` - 配置文件
 
 #### Step 2: 配置代理 / Configure Proxy
@@ -476,34 +476,40 @@ target_link_libraries(version PRIVATE ws2_32)
 
 #### Step 3: 部署 DLL / Deploy DLL
 
-将 `version.dll` 和 `config.json` 复制到目标程序的**同一目录**：
+将 `winmm.dll` 和 `config.json` 复制到目标程序的**同一目录**：
 
 ```
 目标程序目录/
 ├── 目标程序.exe
-├── version.dll      ← 放这里
+├── winmm.dll      ← 放这里
 └── config.json      ← 放这里
 ```
 
 启动目标程序，完成！🎉
 
-### 配置文件详解 / Configuration Reference
+### 配置文件说明
 
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `proxy.host` | string | `"127.0.0.1"` | 代理服务器地址 |
-| `proxy.port` | int | `0` | 代理端口 (0=自动探测/读取环境变量) |
-| `proxy.type` | string | `"socks5"` | 代理类型: `socks5` 或 `http` |
-| `fake_ip.enabled` | bool | `true` | 是否启用 FakeIP 系统 |
-| `fake_ip.cidr` | string | `"198.18.0.0/15"` | FakeIP 地址范围 (基准测试保留网段) |
-| `timeout.connect` | int | `5000` | 连接超时 (毫秒) |
-| `timeout.send` | int | `5000` | 发送超时 (毫秒) |
-| `timeout.recv` | int | `5000` | 接收超时 (毫秒) |
-| `child_injection` | bool | `true` | 是否注入子进程 |
-| `traffic_logging` | bool | `false` | 是否记录流量日志 |
-| `target_processes` | array | `[]` | 目标进程列表 (空=全部) |
-| `proxy_rules.allowed_ports` | array | `[80, 443]` | 端口白名单 (空=全部) |
-| `proxy_rules.dns_mode` | string | `"direct"` | DNS策略: `direct`(直连) / `proxy`(走代理) |
+| 配置项 | 说明 | 默认值 |
+| :--- | :--- | :--- |
+| proxy.host | 代理服务器地址 | 127.0.0.1 |
+| proxy.port | 代理服务器端口 | 0 (自动探测) |
+| proxy.type | 代理类型 (socks5/http) | socks5 |
+| fake_ip.enabled | 是否启用 FakeIP 系统 | true |
+| fake_ip.cidr | 虚拟 IP 地址范围 | 198.18.0.0/15 |
+| timeout.connect | 连接超时 (毫秒) | 5000 |
+| timeout.send | 发送超时 (毫秒) | 5000 |
+| timeout.recv | 接收超时 (毫秒) | 5000 |
+| traffic_logging | 是否记录流量日志 | false |
+| child_injection | 是否注入子进程 | true |
+| target_processes | 目标进程列表 (空=全部) | [] |
+| proxy_rules.allowed_ports | 端口白名单 (空=全部) | [80, 443] |
+| proxy_rules.dns_mode | DNS策略 (direct/proxy) | direct |
+
+### 已知不兼容应用
+
+- **PyCharm / IntelliJ IDEA 等 JetBrains 全家桶**:
+  - **原因**: 此类基于 JVM 的应用，其 JIT 编译器与 MinHook 的 Inline Hook 机制存在底层冲突，会导致进程崩溃。
+  - **替代方案**: 请使用 IDE 内置的代理设置 (`Settings` -> `Appearance & Behavior` -> `System Settings` -> `HTTP Proxy`)。
 
 ### 验证是否生效 / Verification
 
@@ -517,7 +523,7 @@ target_link_libraries(version PRIVATE ws2_32)
 
 | 优先级 | 位置 | 说明 |
 |--------|------|------|
-| 1️⃣ | `<DLL所在目录>\logs\` | 与 `version.dll` 同级的 `logs` 子目录 |
+| 1️⃣ | `<DLL所在目录>\logs\` | 与 `winmm.dll` 同级的 `logs` 子目录 |
 | 2️⃣ | `%TEMP%\antigravity-proxy-logs\` | 系统临时目录（通常为 `C:\Users\<用户名>\AppData\Local\Temp\antigravity-proxy-logs\`） |
 
 > 💡 **提示**：如果在 DLL 目录无法创建 `logs` 文件夹（例如权限不足），日志会自动回退到系统 TEMP 目录。
@@ -528,141 +534,38 @@ target_link_libraries(version PRIVATE ws2_32)
 
 ## 🐧 WSL 环境使用指南 / WSL Guide
 
-> ⚠️ **重要提示**：Antigravity-Proxy（version.dll 劫持方案）**无法直接代理 WSL 内部的流量**。
+> ⚠️ **重要提示**：Antigravity-Proxy (winmm.dll 劫持方案) **无法代理 WSL 内部的流量**。
 
-### 为什么 DLL 劫持在 WSL 中不起作用？
+这是由技术架构决定的根本性限制：
+- DLL 注入只能 Hook Windows PE 进程
+- WSL2 运行真正的 Linux 内核，使用 Linux socket() 系统调用
+- 即使注入 wsl.exe，也无法 Hook WSL 内部的 language_server_linux_x64
 
-这是由技术架构决定的根本性限制，无法通过修改代码来解决：
+### WSL 替代方案
 
-| 技术层面 | 详细说明 |
-|---------|----------|
-| **DLL 注入机制** | 本项目使用 Windows `version.dll` 劫持，只能 Hook **Windows PE 进程** |
-| **Winsock API** | 拦截的是 `ws2_32.dll` 中的 `connect()`、`getaddrinfo()` 等 **Windows 专用 API** |
-| **WSL 架构** | WSL2 运行真正的 **Linux 内核**，网络使用 Linux `socket()` 系统调用，与 Windows Winsock **完全独立** |
-| **进程边界** | 即使注入 `wsl.exe`，也无法 Hook 其内部 Linux 子系统中 `language_server_linux_x64` 发出的流量 |
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Windows 主机                              │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  Antigravity-Proxy (version.dll)                           │  │
-│  │  ├── Hook: connect(), getaddrinfo(), WSAConnect()...      │  │
-│  │  └── ✅ 可以拦截所有 Windows 进程的网络请求                 │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                              │                                    │
-│                         ❌ 无法穿透                               │
-│                              ↓                                    │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │               WSL2 (轻量级 Linux 虚拟机)                     │  │
-│  │  ┌──────────────────────────────────────────────────────┐  │  │
-│  │  │  language_server_linux_x64                           │  │  │
-│  │  │  └── 使用 Linux socket() 系统调用 → 绕过 Winsock    │  │  │
-│  │  └──────────────────────────────────────────────────────┘  │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 替代方案
-
-#### 方案一：使用 antissh 工具（推荐 ⭐⭐⭐⭐⭐）
-
-[antissh](https://github.com/ccpopy/antissh) 是专门为在 WSL 中代理 Antigravity Agent 设计的工具。
-
-**原理**：在 WSL 内部使用 **graftcp** 对 `language_server_linux_x64` 进行代理包装。
-
-**快速开始**：
+**方案一：使用 antissh 工具（推荐）**
 ```bash
 # 在 WSL 中执行
 curl -O https://raw.githubusercontent.com/ccpopy/antissh/main/antissh.sh
-chmod +x antissh.sh
-bash ./antissh.sh
+chmod +x antissh.sh && bash ./antissh.sh
 ```
+项目地址：https://github.com/ccpopy/antissh
 
-脚本会引导你：
-1. 输入代理地址（如 `socks5://127.0.0.1:10808`）
-2. 自动安装依赖并编译 graftcp
-3. 自动找到并包装 `language_server_linux_x64`
-
-**优点**：
-- 专门针对此场景设计
-- 无需修改 Antigravity-Proxy 代码
-- 社区持续维护
-
-**注意**：IDE 升级后可能需要重新运行脚本。
-
----
-
-#### 方案二：WSL Mirrored 网络模式（推荐 ⭐⭐⭐⭐）
-
-**原理**：让 WSL 共享 Windows 的网络栈，从而可以使用 `127.0.0.1` 访问 Windows 上的代理。
-
-**配置步骤**：
-
-1. 在 Windows 用户目录创建或编辑 `.wslconfig` 文件：
-
-```powershell
-# PowerShell 执行
-notepad "$env:USERPROFILE\.wslconfig"
-```
-
-2. 添加以下内容：
-
+**方案二：WSL Mirrored 网络模式**
+1. 创建 %USERPROFILE%\.wslconfig 文件，内容如下：
 ```ini
 [wsl2]
 networkingMode=mirrored
 ```
-
-3. 重启 WSL：
-
-```powershell
-wsl --shutdown
-```
-
-4. 在 WSL 中设置环境变量（添加到 `~/.bashrc` 或 `~/.zshrc`）：
-
+2. 执行 `wsl --shutdown` 重启 WSL
+3. 在 WSL 中设置环境变量：
 ```bash
 export ALL_PROXY=socks5://127.0.0.1:7890
-export HTTPS_PROXY=http://127.0.0.1:7890
-export HTTP_PROXY=http://127.0.0.1:7890
 ```
+要求：Windows 11 22H2+，WSL 2.0+
 
-**要求**：
-- Windows 11 22H2 或更高版本
-- WSL 版本 >= 2.0.0（运行 `wsl --version` 检查）
-
-**优点**：
-- 无需安装额外工具
-- 配置简单
-
-**缺点**：
-- 环境变量方式可能对某些不读取环境变量的程序无效
-
----
-
-#### 方案三：TUN 模式全局透明代理（推荐 ⭐⭐⭐）
-
-**原理**：使用 Clash/Mihomo 的 TUN 模式创建虚拟网卡，在 IP 层拦截所有流量。
-
-**操作**：在 Clash/Mihomo 中开启 TUN 模式即可。
-
-**优点**：
-- 真正的全局代理，覆盖所有应用
-- 无需针对单个程序配置
-
-**缺点**：
-- 需要管理员权限
-- 可能影响系统网络性能
-- 与 Antigravity-Proxy 的定位（精准代理）有所重叠
-
----
-
-### 方案对比
-
-| 方案 | 适用场景 | 复杂度 | 推荐度 |
-|------|---------|--------|--------|
-| **antissh** | 仅需在 WSL 中代理 Antigravity | 中等 | ⭐⭐⭐⭐⭐ |
-| **Mirrored 模式** | 系统满足版本要求，需简单代理 | 低 | ⭐⭐⭐⭐ |
-| **TUN 全局代理** | 需要所有流量代理 | 低 | ⭐⭐⭐ |
+**方案三：TUN 模式全局代理**
+在 Clash/Mihomo 中开启 TUN 模式，实现全局透明代理。
 
 ---
 
@@ -688,12 +591,12 @@ export HTTP_PROXY=http://127.0.0.1:7890
 }
 ```
 
-然后将 `version.dll` 和 `config.json` 复制到 Chrome 安装目录：
+然后将 `winmm.dll` 和 `config.json` 复制到 Chrome 安装目录：
 
 ```
 C:\Program Files\Google\Chrome\Application\
 ├── chrome.exe
-├── version.dll      ← 放这里
+├── winmm.dll      ← 放这里
 └── config.json      ← 放这里
 ```
 
@@ -702,7 +605,7 @@ C:\Program Files\Google\Chrome\Application\
 ```
 C:\Users\你的用户名\AppData\Local\Programs\Microsoft VS Code\
 ├── Code.exe
-├── version.dll      ← 放这里
+├── winmm.dll      ← 放这里
 └── config.json      ← 放这里
 ```
 
@@ -731,7 +634,7 @@ C:\Users\你的用户名\AppData\Local\Programs\Microsoft VS Code\
 | **代理协议** | `src/network/Socks5.hpp` | SOCKS5 握手实现 |
 | **代理协议** | `src/network/HttpConnect.hpp` | HTTP CONNECT 实现 |
 | **FakeIP** | `src/network/FakeIP.hpp` | 虚拟 IP 分配逻辑 |
-| **DLL 劫持** | `src/proxy/VersionProxy.cpp` | version.dll 代理转发 |
+| **DLL 劫持** | `src/proxy/VersionProxy.cpp` | winmm.dll 代理转发 |
 | **进程注入** | `src/injection/ProcessInjector.hpp` | 子进程注入逻辑 |
 
 #### 如何添加新的 Hook？

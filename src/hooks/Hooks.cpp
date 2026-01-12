@@ -135,6 +135,12 @@ static std::string SockaddrToString(const sockaddr* addr) {
         if (!inet_ntop(AF_INET, &addr4->sin_addr, buf, sizeof(buf))) return "";
         return std::string(buf) + ":" + std::to_string(ntohs(addr4->sin_port));
     }
+    if (addr->sa_family == AF_INET6) {
+        const auto* addr6 = (const sockaddr_in6*)addr;
+        char buf[INET6_ADDRSTRLEN] = {};
+        if (!inet_ntop(AF_INET6, &addr6->sin6_addr, buf, sizeof(buf))) return "";
+        return std::string(buf) + ":" + std::to_string(ntohs(addr6->sin6_port));
+    }
     return "";
 }
 
@@ -202,11 +208,13 @@ static bool DoProxyHandshake(SOCKET s, const std::string& host, uint16_t port) {
     auto& config = Core::Config::Instance();
     if (config.proxy.type == "socks5") {
         if (!Network::Socks5Client::Handshake(s, host, port)) {
+            Core::Logger::Error("SOCKS5 握手失败");
             WSASetLastError(WSAECONNREFUSED);
             return false;
         }
     } else if (config.proxy.type == "http") {
         if (!Network::HttpConnectClient::Handshake(s, host, port)) {
+            Core::Logger::Error("HTTP CONNECT 握手失败");
             WSASetLastError(WSAECONNREFUSED);
             return false;
         }
@@ -257,6 +265,7 @@ static bool HandleConnectExCompletion(LPOVERLAPPED ovl) {
         int sent = fpSend ? fpSend(ctx.sock, ctx.sendBuf, (int)ctx.sendLen, 0) : send(ctx.sock, ctx.sendBuf, (int)ctx.sendLen, 0);
         if (sent == SOCKET_ERROR) {
             int err = WSAGetLastError();
+            Core::Logger::Error("ConnectEx 发送首包失败, WSA错误码=" + std::to_string(err));
             WSASetLastError(err);
             return false;
         }
@@ -281,11 +290,19 @@ BOOL PASCAL DetourConnectEx(
 int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool isWsa) {
     auto& config = Core::Config::Instance();
 
+    Network::SocketWrapper sock(s);
+    sock.SetTimeouts(config.timeout.recv_ms, config.timeout.send_ms);
+
     if (!name || namelen < (int)sizeof(sockaddr)) {
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
     
     if (name->sa_family != AF_INET) {
+        int port = config.GetEffectivePort();
+        if (port != 0) {
+            WSASetLastError(WSAEAFNOSUPPORT);
+            return SOCKET_ERROR;
+        }
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
     
@@ -361,11 +378,9 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
             }
         }
 
-        // 调试模式：暂时禁用握手，验证是否是握手逻辑导致的崩溃
-        // 如果禁用握手后不崩（虽然连接会断），说明问题在 DoProxyHandshake
-        // if (!DoProxyHandshake(s, originalHost, originalPort)) {
-        //     return SOCKET_ERROR;
-        // }
+        if (!DoProxyHandshake(s, originalHost, originalPort)) {
+            return SOCKET_ERROR;
+        }
 
         return 0;
     }
@@ -485,8 +500,27 @@ int WSAAPI DetourWSAIoctl(
     LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
 ) {
     if (!fpWSAIoctl) return SOCKET_ERROR;
-    return fpWSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer, lpvOutBuffer, cbOutBuffer,
+    int result = fpWSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer, lpvOutBuffer, cbOutBuffer,
                             lpcbBytesReturned, lpOverlapped, lpCompletionRoutine);
+    if (result == 0 && dwIoControlCode == SIO_GET_EXTENSION_FUNCTION_POINTER &&
+        lpvInBuffer && cbInBuffer == sizeof(GUID) &&
+        lpvOutBuffer && cbOutBuffer >= sizeof(LPFN_CONNECTEX)) {
+        GUID guid = *(GUID*)lpvInBuffer;
+        if (IsEqualGUID(guid, WSAID_CONNECTEX)) {
+            LPFN_CONNECTEX connectEx = *(LPFN_CONNECTEX*)lpvOutBuffer;
+            if (connectEx && !g_connectExHookInstalled) {
+                std::lock_guard<std::mutex> lock(g_connectExHookMtx);
+                if (!g_connectExHookInstalled) {
+                    if (MH_CreateHook((LPVOID)connectEx, (LPVOID)DetourConnectEx, (LPVOID*)&fpConnectEx) == MH_OK) {
+                        if (MH_EnableHook((LPVOID)connectEx) == MH_OK) {
+                            g_connectExHookInstalled = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return result;
 }
 
 BOOL PASCAL DetourConnectEx(
@@ -498,8 +532,101 @@ BOOL PASCAL DetourConnectEx(
     LPDWORD lpdwBytesSent,
     LPOVERLAPPED lpOverlapped
 ) {
-    if (fpConnectEx) return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
-    return FALSE;
+    if (!fpConnectEx) return FALSE;
+
+    if (!name || namelen < (int)sizeof(sockaddr)) {
+        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
+    if (name->sa_family != AF_INET) {
+        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
+    std::string originalHost;
+    uint16_t originalPort = 0;
+    if (!ResolveOriginalTarget(name, &originalHost, &originalPort)) {
+        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
+    if (IsLoopbackHost(originalHost)) {
+        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
+    auto& config = Core::Config::Instance();
+    int effectivePort = config.GetEffectivePort();
+
+    if (config.proxy.port == 0 && effectivePort == 0) {
+        effectivePort = Network::ProxyDetector::Detect();
+        if (effectivePort > 0) {
+            config.SetDynamicPort(effectivePort);
+        }
+    }
+
+    if (IsProxySelfTarget(originalHost, originalPort, config.proxy, effectivePort)) {
+        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
+    if (effectivePort == 0) {
+        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
+    sockaddr_in proxyAddr{};
+    if (!BuildProxyAddr(config.proxy, effectivePort, &proxyAddr, (sockaddr_in*)name)) {
+        return FALSE;
+    }
+
+    DWORD ignoredBytes = 0;
+    BOOL result = fpConnectEx(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, 0,
+                              lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
+
+    if (!result && config.proxy.port == 0) {
+        int err = WSAGetLastError();
+        if (err != WSA_IO_PENDING && (err == WSAECONNREFUSED || err == WSAETIMEDOUT)) {
+            config.InvalidateDynamicPort();
+            int newPort = Network::ProxyDetector::Detect();
+            if (newPort > 0 && newPort != effectivePort) {
+                config.SetDynamicPort(newPort);
+                if (BuildProxyAddr(config.proxy, newPort, &proxyAddr, (sockaddr_in*)name)) {
+                    result = fpConnectEx(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, 0,
+                                         lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
+                }
+            }
+        }
+    }
+
+    if (!result) {
+        int err = WSAGetLastError();
+        if (err == WSA_IO_PENDING) {
+            if (lpOverlapped) {
+                ConnectExContext ctx{};
+                ctx.sock = s;
+                ctx.host = originalHost;
+                ctx.port = originalPort;
+                ctx.sendBuf = (const char*)lpSendBuffer;
+                ctx.sendLen = dwSendDataLength;
+                ctx.bytesSent = lpdwBytesSent;
+                SaveConnectExContext(lpOverlapped, ctx);
+            }
+            return FALSE;
+        }
+        return FALSE;
+    }
+
+    if (!DoProxyHandshake(s, originalHost, originalPort)) {
+        return FALSE;
+    }
+
+    if (lpSendBuffer && dwSendDataLength > 0) {
+        int sent = fpSend ? fpSend(s, (const char*)lpSendBuffer, (int)dwSendDataLength, 0) : send(s, (const char*)lpSendBuffer, (int)dwSendDataLength, 0);
+        if (sent == SOCKET_ERROR) {
+            return FALSE;
+        }
+        if (lpdwBytesSent) {
+            *lpdwBytesSent = (DWORD)sent;
+        }
+    }
+
+    return TRUE;
 }
 
 BOOL WSAAPI DetourWSAGetOverlappedResult(
@@ -510,7 +637,19 @@ BOOL WSAAPI DetourWSAGetOverlappedResult(
     LPDWORD lpdwFlags
 ) {
     if (!fpWSAGetOverlappedResult) return FALSE;
-    return fpWSAGetOverlappedResult(s, lpOverlapped, lpcbTransfer, fWait, lpdwFlags);
+    BOOL result = fpWSAGetOverlappedResult(s, lpOverlapped, lpcbTransfer, fWait, lpdwFlags);
+    if (result && lpOverlapped) {
+        if (!HandleConnectExCompletion(lpOverlapped)) {
+            if (WSAGetLastError() == 0) WSASetLastError(WSAECONNREFUSED);
+            return FALSE;
+        }
+    } else if (!result && lpOverlapped) {
+        int err = WSAGetLastError();
+        if (err != WSA_IO_INCOMPLETE) {
+            DropConnectExContext(lpOverlapped);
+        }
+    }
+    return result;
 }
 
 BOOL WINAPI DetourGetQueuedCompletionStatus(
@@ -521,7 +660,16 @@ BOOL WINAPI DetourGetQueuedCompletionStatus(
     DWORD dwMilliseconds
 ) {
     if (!fpGetQueuedCompletionStatus) return FALSE;
-    return fpGetQueuedCompletionStatus(CompletionPort, lpNumberOfBytes, lpCompletionKey, lpOverlapped, dwMilliseconds);
+    BOOL result = fpGetQueuedCompletionStatus(CompletionPort, lpNumberOfBytes, lpCompletionKey, lpOverlapped, dwMilliseconds);
+    if (result && lpOverlapped && *lpOverlapped) {
+        if (!HandleConnectExCompletion(*lpOverlapped)) {
+            if (GetLastError() == 0) SetLastError(WSAECONNREFUSED);
+            return FALSE;
+        }
+    } else if (!result && lpOverlapped && *lpOverlapped) {
+        DropConnectExContext(*lpOverlapped);
+    }
+    return result;
 }
 
 BOOL WINAPI DetourGetQueuedCompletionStatusEx(
@@ -533,7 +681,32 @@ BOOL WINAPI DetourGetQueuedCompletionStatusEx(
     BOOL fAlertable
 ) {
     if (!fpGetQueuedCompletionStatusEx) return FALSE;
-    return fpGetQueuedCompletionStatusEx(CompletionPort, lpCompletionPortEntries, ulCount, ulNumEntriesRemoved, dwMilliseconds, fAlertable);
+
+    BOOL result = fpGetQueuedCompletionStatusEx(
+        CompletionPort, lpCompletionPortEntries, ulCount,
+        ulNumEntriesRemoved, dwMilliseconds, fAlertable
+    );
+
+    if (result && lpCompletionPortEntries && ulNumEntriesRemoved && *ulNumEntriesRemoved > 0) {
+        for (ULONG i = 0; i < *ulNumEntriesRemoved; i++) {
+            LPOVERLAPPED ovl = lpCompletionPortEntries[i].lpOverlapped;
+            if (ovl) {
+                if (!HandleConnectExCompletion(ovl)) {
+                    if (GetLastError() == 0) SetLastError(WSAECONNREFUSED);
+                    return FALSE;
+                }
+            }
+        }
+    } else if (!result && lpCompletionPortEntries && ulNumEntriesRemoved && *ulNumEntriesRemoved > 0) {
+        for (ULONG i = 0; i < *ulNumEntriesRemoved; i++) {
+            LPOVERLAPPED ovl = lpCompletionPortEntries[i].lpOverlapped;
+            if (ovl) {
+                DropConnectExContext(ovl);
+            }
+        }
+    }
+
+    return result;
 }
 
 BOOL WINAPI DetourCreateProcessW(
@@ -580,11 +753,16 @@ BOOL WINAPI DetourCreateProcessW(
 }
 
 int WSAAPI DetourSend(SOCKET s, const char* buf, int len, int flags) {
+    Network::TrafficMonitor::Instance().LogSend(s, buf, len);
     return fpSend(s, buf, len, flags);
 }
 
 int WSAAPI DetourRecv(SOCKET s, char* buf, int len, int flags) {
-    return fpRecv(s, buf, len, flags);
+    int result = fpRecv(s, buf, len, flags);
+    if (result > 0) {
+        Network::TrafficMonitor::Instance().LogRecv(s, buf, result);
+    }
+    return result;
 }
 
 int WSAAPI DetourWSASend(
@@ -593,6 +771,9 @@ int WSAAPI DetourWSASend(
     LPWSAOVERLAPPED lpOverlapped,
     LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
 ) {
+    if (lpBuffers && dwBufferCount > 0) {
+        Network::TrafficMonitor::Instance().LogSend(s, lpBuffers[0].buf, lpBuffers[0].len);
+    }
     return fpWSASend(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpOverlapped, lpCompletionRoutine);
 }
 
@@ -602,29 +783,42 @@ int WSAAPI DetourWSARecv(
     LPWSAOVERLAPPED lpOverlapped,
     LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
 ) {
-    return fpWSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, lpCompletionRoutine);
+    int result = fpWSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, lpCompletionRoutine);
+    if (result == 0 && lpNumberOfBytesRecvd && *lpNumberOfBytesRecvd > 0 && lpBuffers && dwBufferCount > 0) {
+        Network::TrafficMonitor::Instance().LogRecv(s, lpBuffers[0].buf, *lpNumberOfBytesRecvd);
+    }
+    return result;
 }
 
 namespace Hooks {
-    template<typename T>
-    void SafeCreateHook(LPCWSTR moduleName, LPCSTR procName, LPVOID detour, T* original) {
-        if (MH_CreateHookApi(moduleName, procName, detour, (LPVOID*)original) == MH_OK) {
-            MH_EnableHook((LPVOID)*original);
-        }
-    }
-
     void Install() {
-        if (MH_Initialize() != MH_OK) return;
+        if (MH_Initialize() != MH_OK) {
+            Core::Logger::Error("MinHook 初始化失败");
+            return;
+        }
         
-        SafeCreateHook(L"ws2_32.dll", "connect", (LPVOID)DetourConnect, &fpConnect);
-        SafeCreateHook(L"ws2_32.dll", "WSAConnect", (LPVOID)DetourWSAConnect, &fpWSAConnect);
-        SafeCreateHook(L"ws2_32.dll", "getaddrinfo", (LPVOID)DetourGetAddrInfo, &fpGetAddrInfo);
-        SafeCreateHook(L"ws2_32.dll", "GetAddrInfoW", (LPVOID)DetourGetAddrInfoW, &fpGetAddrInfoW);
-        SafeCreateHook(L"ws2_32.dll", "gethostbyname", (LPVOID)DetourGetHostByName, &fpGetHostByName);
+        MH_CreateHookApi(L"ws2_32.dll", "connect", (LPVOID)DetourConnect, (LPVOID*)&fpConnect);
+        MH_CreateHookApi(L"ws2_32.dll", "WSAConnect", (LPVOID)DetourWSAConnect, (LPVOID*)&fpWSAConnect);
+        MH_CreateHookApi(L"ws2_32.dll", "getaddrinfo", (LPVOID)DetourGetAddrInfo, (LPVOID*)&fpGetAddrInfo);
+        MH_CreateHookApi(L"ws2_32.dll", "GetAddrInfoW", (LPVOID)DetourGetAddrInfoW, (LPVOID*)&fpGetAddrInfoW);
+        MH_CreateHookApi(L"ws2_32.dll", "gethostbyname", (LPVOID)DetourGetHostByName, (LPVOID*)&fpGetHostByName);
+        MH_CreateHookApi(L"ws2_32.dll", "WSAConnectByNameA", (LPVOID)DetourWSAConnectByNameA, (LPVOID*)&fpWSAConnectByNameA);
+        MH_CreateHookApi(L"ws2_32.dll", "WSAConnectByNameW", (LPVOID)DetourWSAConnectByNameW, (LPVOID*)&fpWSAConnectByNameW);
+        MH_CreateHookApi(L"ws2_32.dll", "WSAIoctl", (LPVOID)DetourWSAIoctl, (LPVOID*)&fpWSAIoctl);
+        MH_CreateHookApi(L"ws2_32.dll", "WSAGetOverlappedResult", (LPVOID)DetourWSAGetOverlappedResult, (LPVOID*)&fpWSAGetOverlappedResult);
+        MH_CreateHookApi(L"kernel32.dll", "CreateProcessW", (LPVOID)DetourCreateProcessW, (LPVOID*)&fpCreateProcessW);
+        MH_CreateHookApi(L"kernel32.dll", "GetQueuedCompletionStatus", (LPVOID)DetourGetQueuedCompletionStatus, (LPVOID*)&fpGetQueuedCompletionStatus);
+        MH_CreateHookApi(L"kernel32.dll", "GetQueuedCompletionStatusEx", (LPVOID)DetourGetQueuedCompletionStatusEx, (LPVOID*)&fpGetQueuedCompletionStatusEx);
+        MH_CreateHookApi(L"ws2_32.dll", "send", (LPVOID)DetourSend, (LPVOID*)&fpSend);
+        MH_CreateHookApi(L"ws2_32.dll", "recv", (LPVOID)DetourRecv, (LPVOID*)&fpRecv);
+        MH_CreateHookApi(L"ws2_32.dll", "WSASend", (LPVOID)DetourWSASend, (LPVOID*)&fpWSASend);
+        MH_CreateHookApi(L"ws2_32.dll", "WSARecv", (LPVOID)DetourWSARecv, (LPVOID*)&fpWSARecv);
         
-        SafeCreateHook(L"kernel32.dll", "CreateProcessW", (LPVOID)DetourCreateProcessW, &fpCreateProcessW);
-
-        Core::Logger::Info("Antigravity-Proxy Hooks Installed (Minimal Mode)");
+        if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
+            Core::Logger::Error("启用 Hooks 失败");
+        } else {
+            Core::Logger::Info("所有 API Hook 安装成功");
+        }
     }
     
     void Uninstall() {
