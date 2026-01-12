@@ -6,199 +6,173 @@
 #include <windows.h>
 
 // ============================================================================
-// 纯 C 风格的 VersionProxy
-// 移除所有 C++ 标准库依赖 (std::string, std::mutex 等)，避免 CRT 初始化问题
+// winmm.dll 代理实现 (纯 C 风格)
 // ============================================================================
 
-static HMODULE g_hRealVersionDll = NULL;
-static volatile LONG g_initFlag = 0; // 0: 未初始化, 1: 初始化中, 2: 已初始化
+static HMODULE g_hRealWinmmDll = NULL;
+static volatile LONG g_initFlag = 0;
 
 // 函数指针类型定义
-typedef BOOL (WINAPI *GetFileVersionInfoA_t)(LPCSTR, DWORD, DWORD, LPVOID);
-typedef DWORD (WINAPI *GetFileVersionInfoByHandle_t)(DWORD, HANDLE, DWORD, LPVOID);
-typedef BOOL (WINAPI *GetFileVersionInfoExA_t)(DWORD, LPCSTR, DWORD, DWORD, LPVOID);
-typedef BOOL (WINAPI *GetFileVersionInfoExW_t)(DWORD, LPCWSTR, DWORD, DWORD, LPVOID);
-typedef DWORD (WINAPI *GetFileVersionInfoSizeA_t)(LPCSTR, LPDWORD);
-typedef DWORD (WINAPI *GetFileVersionInfoSizeExA_t)(DWORD, LPCSTR, LPDWORD);
-typedef DWORD (WINAPI *GetFileVersionInfoSizeExW_t)(DWORD, LPCWSTR, LPDWORD);
-typedef DWORD (WINAPI *GetFileVersionInfoSizeW_t)(LPCWSTR, LPDWORD);
-typedef BOOL (WINAPI *GetFileVersionInfoW_t)(LPCWSTR, DWORD, DWORD, LPVOID);
-typedef DWORD (WINAPI *VerFindFileA_t)(DWORD, LPCSTR, LPCSTR, LPCSTR, LPSTR, PUINT, LPSTR, PUINT);
-typedef DWORD (WINAPI *VerFindFileW_t)(DWORD, LPCWSTR, LPCWSTR, LPCWSTR, LPWSTR, PUINT, LPWSTR, PUINT);
-typedef DWORD (WINAPI *VerInstallFileA_t)(DWORD, LPCSTR, LPCSTR, LPCSTR, LPCSTR, LPCSTR, LPSTR, PUINT);
-typedef DWORD (WINAPI *VerInstallFileW_t)(DWORD, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPWSTR, PUINT);
-typedef DWORD (WINAPI *VerLanguageNameA_t)(DWORD, LPSTR, DWORD);
-typedef DWORD (WINAPI *VerLanguageNameW_t)(DWORD, LPWSTR, DWORD);
-typedef BOOL (WINAPI *VerQueryValueA_t)(LPCVOID, LPCSTR, LPVOID*, PUINT);
-typedef BOOL (WINAPI *VerQueryValueW_t)(LPCVOID, LPCWSTR, LPVOID*, PUINT);
+typedef BOOL (WINAPI *PlaySoundA_t)(LPCSTR, HMODULE, DWORD);
+typedef BOOL (WINAPI *PlaySoundW_t)(LPCWSTR, HMODULE, DWORD);
+typedef MMRESULT (WINAPI *timeBeginPeriod_t)(UINT);
+typedef MMRESULT (WINAPI *timeEndPeriod_t)(UINT);
+typedef MMRESULT (WINAPI *timeGetDevCaps_t)(LPTIMECAPS, UINT);
+typedef DWORD (WINAPI *timeGetTime_t)(void);
+typedef MMRESULT (WINAPI *waveOutOpen_t)(LPHWAVEOUT, UINT, LPCWAVEFORMATEX, DWORD_PTR, DWORD_PTR, DWORD);
+typedef MMRESULT (WINAPI *waveOutClose_t)(HWAVEOUT);
+typedef MMRESULT (WINAPI *waveOutPrepareHeader_t)(HWAVEOUT, LPWAVEHDR, UINT);
+typedef MMRESULT (WINAPI *waveOutUnprepareHeader_t)(HWAVEOUT, LPWAVEHDR, UINT);
+typedef MMRESULT (WINAPI *waveOutWrite_t)(HWAVEOUT, LPWAVEHDR, UINT);
+typedef MMRESULT (WINAPI *waveOutReset_t)(HWAVEOUT);
+typedef MMRESULT (WINAPI *joyGetPosEx_t)(UINT, LPJOYINFOEX);
+typedef MMRESULT (WINAPI *mciSendStringA_t)(LPCSTR, LPSTR, UINT, HANDLE);
+typedef MMRESULT (WINAPI *mciSendStringW_t)(LPCWSTR, LPWSTR, UINT, HANDLE);
 
 // 函数指针实例
-static GetFileVersionInfoA_t fp_GetFileVersionInfoA = NULL;
-static GetFileVersionInfoByHandle_t fp_GetFileVersionInfoByHandle = NULL;
-static GetFileVersionInfoExA_t fp_GetFileVersionInfoExA = NULL;
-static GetFileVersionInfoExW_t fp_GetFileVersionInfoExW = NULL;
-static GetFileVersionInfoSizeA_t fp_GetFileVersionInfoSizeA = NULL;
-static GetFileVersionInfoSizeExA_t fp_GetFileVersionInfoSizeExA = NULL;
-static GetFileVersionInfoSizeExW_t fp_GetFileVersionInfoSizeExW = NULL;
-static GetFileVersionInfoSizeW_t fp_GetFileVersionInfoSizeW = NULL;
-static GetFileVersionInfoW_t fp_GetFileVersionInfoW = NULL;
-static VerFindFileA_t fp_VerFindFileA = NULL;
-static VerFindFileW_t fp_VerFindFileW = NULL;
-static VerInstallFileA_t fp_VerInstallFileA = NULL;
-static VerInstallFileW_t fp_VerInstallFileW = NULL;
-static VerLanguageNameA_t fp_VerLanguageNameA = NULL;
-static VerLanguageNameW_t fp_VerLanguageNameW = NULL;
-static VerQueryValueA_t fp_VerQueryValueA = NULL;
-static VerQueryValueW_t fp_VerQueryValueW = NULL;
+static PlaySoundA_t fp_PlaySoundA = NULL;
+static PlaySoundW_t fp_PlaySoundW = NULL;
+static timeBeginPeriod_t fp_timeBeginPeriod = NULL;
+static timeEndPeriod_t fp_timeEndPeriod = NULL;
+static timeGetDevCaps_t fp_timeGetDevCaps = NULL;
+static timeGetTime_t fp_timeGetTime = NULL;
+static waveOutOpen_t fp_waveOutOpen = NULL;
+static waveOutClose_t fp_waveOutClose = NULL;
+static waveOutPrepareHeader_t fp_waveOutPrepareHeader = NULL;
+static waveOutUnprepareHeader_t fp_waveOutUnprepareHeader = NULL;
+static waveOutWrite_t fp_waveOutWrite = NULL;
+static waveOutReset_t fp_waveOutReset = NULL;
+static joyGetPosEx_t fp_joyGetPosEx = NULL;
+static mciSendStringA_t fp_mciSendStringA = NULL;
+static mciSendStringW_t fp_mciSendStringW = NULL;
 
 static void LoadRealDll() {
     wchar_t systemDir[MAX_PATH];
     if (GetSystemDirectoryW(systemDir, MAX_PATH) == 0) return;
 
     wchar_t realPath[MAX_PATH];
-    // 简单的字符串拼接，不使用 std::wstring
     lstrcpyW(realPath, systemDir);
-    lstrcatW(realPath, L"\\version.dll");
+    lstrcatW(realPath, L"\\winmm.dll");
 
-    g_hRealVersionDll = LoadLibraryW(realPath);
-    if (!g_hRealVersionDll) return;
+    g_hRealWinmmDll = LoadLibraryW(realPath);
+    if (!g_hRealWinmmDll) return;
 
-    fp_GetFileVersionInfoA = (GetFileVersionInfoA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoA");
-    fp_GetFileVersionInfoByHandle = (GetFileVersionInfoByHandle_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoByHandle");
-    fp_GetFileVersionInfoExA = (GetFileVersionInfoExA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoExA");
-    fp_GetFileVersionInfoExW = (GetFileVersionInfoExW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoExW");
-    fp_GetFileVersionInfoSizeA = (GetFileVersionInfoSizeA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeA");
-    fp_GetFileVersionInfoSizeExA = (GetFileVersionInfoSizeExA_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeExA");
-    fp_GetFileVersionInfoSizeExW = (GetFileVersionInfoSizeExW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeExW");
-    fp_GetFileVersionInfoSizeW = (GetFileVersionInfoSizeW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoSizeW");
-    fp_GetFileVersionInfoW = (GetFileVersionInfoW_t)GetProcAddress(g_hRealVersionDll, "GetFileVersionInfoW");
-    fp_VerFindFileA = (VerFindFileA_t)GetProcAddress(g_hRealVersionDll, "VerFindFileA");
-    fp_VerFindFileW = (VerFindFileW_t)GetProcAddress(g_hRealVersionDll, "VerFindFileW");
-    fp_VerInstallFileA = (VerInstallFileA_t)GetProcAddress(g_hRealVersionDll, "VerInstallFileA");
-    fp_VerInstallFileW = (VerInstallFileW_t)GetProcAddress(g_hRealVersionDll, "VerInstallFileW");
-    fp_VerLanguageNameA = (VerLanguageNameA_t)GetProcAddress(g_hRealVersionDll, "VerLanguageNameA");
-    fp_VerLanguageNameW = (VerLanguageNameW_t)GetProcAddress(g_hRealVersionDll, "VerLanguageNameW");
-    fp_VerQueryValueA = (VerQueryValueA_t)GetProcAddress(g_hRealVersionDll, "VerQueryValueA");
-    fp_VerQueryValueW = (VerQueryValueW_t)GetProcAddress(g_hRealVersionDll, "VerQueryValueW");
+    fp_PlaySoundA = (PlaySoundA_t)GetProcAddress(g_hRealWinmmDll, "PlaySoundA");
+    fp_PlaySoundW = (PlaySoundW_t)GetProcAddress(g_hRealWinmmDll, "PlaySoundW");
+    fp_timeBeginPeriod = (timeBeginPeriod_t)GetProcAddress(g_hRealWinmmDll, "timeBeginPeriod");
+    fp_timeEndPeriod = (timeEndPeriod_t)GetProcAddress(g_hRealWinmmDll, "timeEndPeriod");
+    fp_timeGetDevCaps = (timeGetDevCaps_t)GetProcAddress(g_hRealWinmmDll, "timeGetDevCaps");
+    fp_timeGetTime = (timeGetTime_t)GetProcAddress(g_hRealWinmmDll, "timeGetTime");
+    fp_waveOutOpen = (waveOutOpen_t)GetProcAddress(g_hRealWinmmDll, "waveOutOpen");
+    fp_waveOutClose = (waveOutClose_t)GetProcAddress(g_hRealWinmmDll, "waveOutClose");
+    fp_waveOutPrepareHeader = (waveOutPrepareHeader_t)GetProcAddress(g_hRealWinmmDll, "waveOutPrepareHeader");
+    fp_waveOutUnprepareHeader = (waveOutUnprepareHeader_t)GetProcAddress(g_hRealWinmmDll, "waveOutUnprepareHeader");
+    fp_waveOutWrite = (waveOutWrite_t)GetProcAddress(g_hRealWinmmDll, "waveOutWrite");
+    fp_waveOutReset = (waveOutReset_t)GetProcAddress(g_hRealWinmmDll, "waveOutReset");
+    fp_joyGetPosEx = (joyGetPosEx_t)GetProcAddress(g_hRealWinmmDll, "joyGetPosEx");
+    fp_mciSendStringA = (mciSendStringA_t)GetProcAddress(g_hRealWinmmDll, "mciSendStringA");
+    fp_mciSendStringW = (mciSendStringW_t)GetProcAddress(g_hRealWinmmDll, "mciSendStringW");
 }
 
 static void EnsureRealDllLoaded() {
-    // 双重检查锁定 (Double-Checked Locking) 的简易实现
     if (g_initFlag == 2) return;
-
-    // 尝试获取初始化锁
     if (InterlockedCompareExchange(&g_initFlag, 1, 0) == 0) {
         LoadRealDll();
-        // 标记为已初始化
         InterlockedExchange(&g_initFlag, 2);
     } else {
-        // 另一个线程正在初始化，自旋等待
-        while (g_initFlag != 2) {
-            Sleep(1);
-        }
+        while (g_initFlag != 2) Sleep(1);
     }
 }
 
 namespace VersionProxy {
     bool Initialize() {
-        // 可以在这里预加载，也可以完全懒加载
-        // EnsureRealDllLoaded();
+        // 兼容旧接口名，实际初始化 winmm
         return true;
     }
     
     void Uninitialize() {
-        if (g_hRealVersionDll) {
-            FreeLibrary(g_hRealVersionDll);
-            g_hRealVersionDll = NULL;
+        if (g_hRealWinmmDll) {
+            FreeLibrary(g_hRealWinmmDll);
+            g_hRealWinmmDll = NULL;
         }
     }
 }
 
 extern "C" {
 
-BOOL WINAPI VersionProxy_GetFileVersionInfoA(LPCSTR lptstrFilename, DWORD dwHandle, DWORD dwLen, LPVOID lpData) {
+BOOL WINAPI WinmmProxy_PlaySoundA(LPCSTR pszSound, HMODULE hmod, DWORD fdwSound) {
     EnsureRealDllLoaded();
-    return fp_GetFileVersionInfoA ? fp_GetFileVersionInfoA(lptstrFilename, dwHandle, dwLen, lpData) : FALSE;
+    return fp_PlaySoundA ? fp_PlaySoundA(pszSound, hmod, fdwSound) : FALSE;
 }
 
-DWORD WINAPI VersionProxy_GetFileVersionInfoByHandle(DWORD dwFlags, HANDLE hFile, DWORD dwLen, LPVOID lpData) {
+BOOL WINAPI WinmmProxy_PlaySoundW(LPCWSTR pszSound, HMODULE hmod, DWORD fdwSound) {
     EnsureRealDllLoaded();
-    return fp_GetFileVersionInfoByHandle ? fp_GetFileVersionInfoByHandle(dwFlags, hFile, dwLen, lpData) : 0;
+    return fp_PlaySoundW ? fp_PlaySoundW(pszSound, hmod, fdwSound) : FALSE;
 }
 
-BOOL WINAPI VersionProxy_GetFileVersionInfoExA(DWORD dwFlags, LPCSTR lpwstrFilename, DWORD dwHandle, DWORD dwLen, LPVOID lpData) {
+MMRESULT WINAPI WinmmProxy_timeBeginPeriod(UINT uPeriod) {
     EnsureRealDllLoaded();
-    return fp_GetFileVersionInfoExA ? fp_GetFileVersionInfoExA(dwFlags, lpwstrFilename, dwHandle, dwLen, lpData) : FALSE;
+    return fp_timeBeginPeriod ? fp_timeBeginPeriod(uPeriod) : TIMERR_NOCANDO;
 }
 
-BOOL WINAPI VersionProxy_GetFileVersionInfoExW(DWORD dwFlags, LPCWSTR lpwstrFilename, DWORD dwHandle, DWORD dwLen, LPVOID lpData) {
+MMRESULT WINAPI WinmmProxy_timeEndPeriod(UINT uPeriod) {
     EnsureRealDllLoaded();
-    return fp_GetFileVersionInfoExW ? fp_GetFileVersionInfoExW(dwFlags, lpwstrFilename, dwHandle, dwLen, lpData) : FALSE;
+    return fp_timeEndPeriod ? fp_timeEndPeriod(uPeriod) : TIMERR_NOCANDO;
 }
 
-DWORD WINAPI VersionProxy_GetFileVersionInfoSizeA(LPCSTR lptstrFilename, LPDWORD lpdwHandle) {
+MMRESULT WINAPI WinmmProxy_timeGetDevCaps(LPTIMECAPS ptc, UINT cbtc) {
     EnsureRealDllLoaded();
-    return fp_GetFileVersionInfoSizeA ? fp_GetFileVersionInfoSizeA(lptstrFilename, lpdwHandle) : 0;
+    return fp_timeGetDevCaps ? fp_timeGetDevCaps(ptc, cbtc) : TIMERR_NOCANDO;
 }
 
-DWORD WINAPI VersionProxy_GetFileVersionInfoSizeExA(DWORD dwFlags, LPCSTR lpwstrFilename, LPDWORD lpdwHandle) {
+DWORD WINAPI WinmmProxy_timeGetTime(void) {
     EnsureRealDllLoaded();
-    return fp_GetFileVersionInfoSizeExA ? fp_GetFileVersionInfoSizeExA(dwFlags, lpwstrFilename, lpdwHandle) : 0;
+    return fp_timeGetTime ? fp_timeGetTime() : 0;
 }
 
-DWORD WINAPI VersionProxy_GetFileVersionInfoSizeExW(DWORD dwFlags, LPCWSTR lpwstrFilename, LPDWORD lpdwHandle) {
+MMRESULT WINAPI WinmmProxy_waveOutOpen(LPHWAVEOUT phwo, UINT uDeviceID, LPCWAVEFORMATEX pwfx, DWORD_PTR dwCallback, DWORD_PTR dwInstance, DWORD fdwOpen) {
     EnsureRealDllLoaded();
-    return fp_GetFileVersionInfoSizeExW ? fp_GetFileVersionInfoSizeExW(dwFlags, lpwstrFilename, lpdwHandle) : 0;
+    return fp_waveOutOpen ? fp_waveOutOpen(phwo, uDeviceID, pwfx, dwCallback, dwInstance, fdwOpen) : MMSYSERR_ERROR;
 }
 
-DWORD WINAPI VersionProxy_GetFileVersionInfoSizeW(LPCWSTR lptstrFilename, LPDWORD lpdwHandle) {
+MMRESULT WINAPI WinmmProxy_waveOutClose(HWAVEOUT hwo) {
     EnsureRealDllLoaded();
-    return fp_GetFileVersionInfoSizeW ? fp_GetFileVersionInfoSizeW(lptstrFilename, lpdwHandle) : 0;
+    return fp_waveOutClose ? fp_waveOutClose(hwo) : MMSYSERR_ERROR;
 }
 
-BOOL WINAPI VersionProxy_GetFileVersionInfoW(LPCWSTR lptstrFilename, DWORD dwHandle, DWORD dwLen, LPVOID lpData) {
+MMRESULT WINAPI WinmmProxy_waveOutPrepareHeader(HWAVEOUT hwo, LPWAVEHDR pwh, UINT cbwh) {
     EnsureRealDllLoaded();
-    return fp_GetFileVersionInfoW ? fp_GetFileVersionInfoW(lptstrFilename, dwHandle, dwLen, lpData) : FALSE;
+    return fp_waveOutPrepareHeader ? fp_waveOutPrepareHeader(hwo, pwh, cbwh) : MMSYSERR_ERROR;
 }
 
-DWORD WINAPI VersionProxy_VerFindFileA(DWORD uFlags, LPCSTR szFileName, LPCSTR szWinDir, LPCSTR szAppDir, LPSTR szCurDir, PUINT puCurDirLen, LPSTR szDestDir, PUINT puDestDirLen) {
+MMRESULT WINAPI WinmmProxy_waveOutUnprepareHeader(HWAVEOUT hwo, LPWAVEHDR pwh, UINT cbwh) {
     EnsureRealDllLoaded();
-    return fp_VerFindFileA ? fp_VerFindFileA(uFlags, szFileName, szWinDir, szAppDir, szCurDir, puCurDirLen, szDestDir, puDestDirLen) : 0;
+    return fp_waveOutUnprepareHeader ? fp_waveOutUnprepareHeader(hwo, pwh, cbwh) : MMSYSERR_ERROR;
 }
 
-DWORD WINAPI VersionProxy_VerFindFileW(DWORD uFlags, LPCWSTR szFileName, LPCWSTR szWinDir, LPCWSTR szAppDir, LPWSTR szCurDir, PUINT puCurDirLen, LPWSTR szDestDir, PUINT puDestDirLen) {
+MMRESULT WINAPI WinmmProxy_waveOutWrite(HWAVEOUT hwo, LPWAVEHDR pwh, UINT cbwh) {
     EnsureRealDllLoaded();
-    return fp_VerFindFileW ? fp_VerFindFileW(uFlags, szFileName, szWinDir, szAppDir, szCurDir, puCurDirLen, szDestDir, puDestDirLen) : 0;
+    return fp_waveOutWrite ? fp_waveOutWrite(hwo, pwh, cbwh) : MMSYSERR_ERROR;
 }
 
-DWORD WINAPI VersionProxy_VerInstallFileA(DWORD uFlags, LPCSTR szSrcFileName, LPCSTR szDestFileName, LPCSTR szSrcDir, LPCSTR szDestDir, LPCSTR szCurDir, LPSTR szTmpFile, PUINT puTmpFileLen) {
+MMRESULT WINAPI WinmmProxy_waveOutReset(HWAVEOUT hwo) {
     EnsureRealDllLoaded();
-    return fp_VerInstallFileA ? fp_VerInstallFileA(uFlags, szSrcFileName, szDestFileName, szSrcDir, szDestDir, szCurDir, szTmpFile, puTmpFileLen) : 0;
+    return fp_waveOutReset ? fp_waveOutReset(hwo) : MMSYSERR_ERROR;
 }
 
-DWORD WINAPI VersionProxy_VerInstallFileW(DWORD uFlags, LPCWSTR szSrcFileName, LPCWSTR szDestFileName, LPCWSTR szSrcDir, LPCWSTR szDestDir, LPCWSTR szCurDir, LPWSTR szTmpFile, PUINT puTmpFileLen) {
+MMRESULT WINAPI WinmmProxy_joyGetPosEx(UINT uJoyID, LPJOYINFOEX pji) {
     EnsureRealDllLoaded();
-    return fp_VerInstallFileW ? fp_VerInstallFileW(uFlags, szSrcFileName, szDestFileName, szSrcDir, szDestDir, szCurDir, szTmpFile, puTmpFileLen) : 0;
+    return fp_joyGetPosEx ? fp_joyGetPosEx(uJoyID, pji) : JOYERR_PARMS;
 }
 
-DWORD WINAPI VersionProxy_VerLanguageNameA(DWORD wLang, LPSTR szLang, DWORD cchLang) {
+MMRESULT WINAPI WinmmProxy_mciSendStringA(LPCSTR lpstrCommand, LPSTR lpstrReturnString, UINT uReturnLength, HANDLE hwndCallback) {
     EnsureRealDllLoaded();
-    return fp_VerLanguageNameA ? fp_VerLanguageNameA(wLang, szLang, cchLang) : 0;
+    return fp_mciSendStringA ? fp_mciSendStringA(lpstrCommand, lpstrReturnString, uReturnLength, hwndCallback) : MCIERR_INTERNAL;
 }
 
-DWORD WINAPI VersionProxy_VerLanguageNameW(DWORD wLang, LPWSTR szLang, DWORD cchLang) {
+MMRESULT WINAPI WinmmProxy_mciSendStringW(LPCWSTR lpstrCommand, LPWSTR lpstrReturnString, UINT uReturnLength, HANDLE hwndCallback) {
     EnsureRealDllLoaded();
-    return fp_VerLanguageNameW ? fp_VerLanguageNameW(wLang, szLang, cchLang) : 0;
-}
-
-BOOL WINAPI VersionProxy_VerQueryValueA(LPCVOID pBlock, LPCSTR lpSubBlock, LPVOID* lplpBuffer, PUINT puLen) {
-    EnsureRealDllLoaded();
-    return fp_VerQueryValueA ? fp_VerQueryValueA(pBlock, lpSubBlock, lplpBuffer, puLen) : FALSE;
-}
-
-BOOL WINAPI VersionProxy_VerQueryValueW(LPCVOID pBlock, LPCWSTR lpSubBlock, LPVOID* lplpBuffer, PUINT puLen) {
-    EnsureRealDllLoaded();
-    return fp_VerQueryValueW ? fp_VerQueryValueW(pBlock, lpSubBlock, lplpBuffer, puLen) : FALSE;
+    return fp_mciSendStringW ? fp_mciSendStringW(lpstrCommand, lpstrReturnString, uReturnLength, hwndCallback) : MCIERR_INTERNAL;
 }
 
 } // extern "C"

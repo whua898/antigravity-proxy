@@ -51,13 +51,13 @@ set(MINHOOK_PATCH_VERSION 3)
 set(MINHOOK_VERSION ${MINHOOK_MAJOR_VERSION}.${MINHOOK_MINOR_VERSION}.${MINHOOK_PATCH_VERSION})
 
 ################
-#    BUILD     # 
+#    BUILD     #
 ################
 
 option(BUILD_SHARED_LIBS "build shared version" OFF)
 
 # MinHook Sources
-set(SOURCES_MINHOOK 
+set(SOURCES_MINHOOK
   "src/buffer.c"
   "src/hook.c"
   "src/trampoline.c"
@@ -78,45 +78,45 @@ set(SOURCES_PROXY
 
 # Resources
 if(BUILD_SHARED_LIBS)
-  set(RESOURCES 
+  set(RESOURCES
     "dll_resources/MinHook.rc"
     "dll_resources/MinHook.def"
   )
 endif()
 
-# Build antigravity-proxy DLL (输出名为 version.dll)
-add_library(version SHARED ${SOURCES_MINHOOK} ${SOURCES_HDE} ${SOURCES_PROXY} ${RESOURCES})
+# Build antigravity-proxy DLL (输出名为 winmm.dll)
+add_library(winmm SHARED ${SOURCES_MINHOOK} ${SOURCES_HDE} ${SOURCES_PROXY} ${RESOURCES})
 
-# 设置模块定义文件 (导出 version.dll 函数)
-set_target_properties(version PROPERTIES
-  LINK_FLAGS "/DEF:\"${CMAKE_CURRENT_SOURCE_DIR}/src/proxy/version.def\""
+# 设置模块定义文件 (导出 winmm.dll 函数)
+set_target_properties(winmm PROPERTIES
+  LINK_FLAGS "/DEF:\"${CMAKE_CURRENT_SOURCE_DIR}/src/proxy/winmm.def\""
 )
 
-target_include_directories(version PUBLIC
+target_include_directories(winmm PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/>
   $<INSTALL_INTERFACE:include>
 )
 
-target_include_directories(version PRIVATE "src/")
-target_include_directories(version PRIVATE "src/hde/")
+target_include_directories(winmm PRIVATE "src/")
+target_include_directories(winmm PRIVATE "src/hde/")
 
 # Link WS2_32
-target_link_libraries(version PRIVATE ws2_32)
+target_link_libraries(winmm PRIVATE ws2_32)
 
 if(WIN32)
-  set_target_properties(version PROPERTIES PREFIX "")
-  if(CMAKE_SIZEOF_VOID_P EQUAL 8)   
-    set_target_properties(version PROPERTIES OUTPUT_NAME "version")
-    set_target_properties(version PROPERTIES DEBUG_POSTFIX ".x64d")
-    set_target_properties(version PROPERTIES RELEASE_POSTFIX "")
+  set_target_properties(winmm PROPERTIES PREFIX "")
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set_target_properties(winmm PROPERTIES OUTPUT_NAME "winmm")
+    set_target_properties(winmm PROPERTIES DEBUG_POSTFIX ".x64d")
+    set_target_properties(winmm PROPERTIES RELEASE_POSTFIX "")
   else()
-    set_target_properties(version PROPERTIES OUTPUT_NAME "version")
-    set_target_properties(version PROPERTIES DEBUG_POSTFIX ".x32d")
-    set_target_properties(version PROPERTIES RELEASE_POSTFIX "")
+    set_target_properties(winmm PROPERTIES OUTPUT_NAME "winmm")
+    set_target_properties(winmm PROPERTIES DEBUG_POSTFIX ".x32d")
+    set_target_properties(winmm PROPERTIES RELEASE_POSTFIX "")
   endif()
 endif()
 
 ###################
 #     INSTALL     #
 ###################
-install(TARGETS version RUNTIME DESTINATION "bin")
+install(TARGETS winmm RUNTIME DESTINATION "bin")

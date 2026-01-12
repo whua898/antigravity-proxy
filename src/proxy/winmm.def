@@ -1,0 +1,21 @@
+﻿; winmm.dll Module Definition File
+; 用于静态导出转发
+
+LIBRARY winmm
+
+EXPORTS
+    PlaySoundA = WinmmProxy_PlaySoundA
+    PlaySoundW = WinmmProxy_PlaySoundW
+    timeBeginPeriod = WinmmProxy_timeBeginPeriod
+    timeEndPeriod = WinmmProxy_timeEndPeriod
+    timeGetDevCaps = WinmmProxy_timeGetDevCaps
+    timeGetTime = WinmmProxy_timeGetTime
+    waveOutOpen = WinmmProxy_waveOutOpen
+    waveOutClose = WinmmProxy_waveOutClose
+    waveOutPrepareHeader = WinmmProxy_waveOutPrepareHeader
+    waveOutUnprepareHeader = WinmmProxy_waveOutUnprepareHeader
+    waveOutWrite = WinmmProxy_waveOutWrite
+    waveOutReset = WinmmProxy_waveOutReset
+    joyGetPosEx = WinmmProxy_joyGetPosEx
+    mciSendStringA = WinmmProxy_mciSendStringA
+    mciSendStringW = WinmmProxy_mciSendStringW
