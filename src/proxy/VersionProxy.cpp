@@ -4,6 +4,7 @@
 #endif
 
 #include <windows.h>
+#include <mmsystem.h> // 必须包含此头文件以定义 MMRESULT, HWAVEOUT 等类型
 
 // ============================================================================
 // winmm.dll 代理实现 (纯 C 风格)
