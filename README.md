@@ -28,6 +28,7 @@
 - [⚡ Antigravity 快速开始 / Quick Start](#-antigravity-快速开始--quick-start)
 - [✨ 功能特性 / Features](#-功能特性--features)
 - [🔧 工作原理 / How It Works](#-工作原理--how-it-works)
+- [☕ Java Agent 方案 (适用于 PyCharm/IntelliJ)](#-java-agent-方案-适用于-pycharmintellij)
 - [🛠️ 编译构建 / Build](#️-编译构建--build)
 - [📝 使用方法 / Usage](#-使用方法--usage)
 - [🐧 WSL 环境使用指南 / WSL Guide](#-wsl-环境使用指南--wsl-guide)
@@ -39,7 +40,7 @@
 
 ## 📖 项目介绍 / Introduction
 
-**Antigravity-Proxy** 是专门为 **Antigravity 编辑器**量身定制的 Windows 代理注入组件（DLL）。
+**Antigravity-Proxy** 是专门为 **Antigravity 编辑器**量身定制的 Windows 代理注入组件。
 
 它的目标很简单：让中国用户使用 Antigravity 时，**不用开 Clash TUN 模式**，也能把网络流量稳定交给你的 SOCKS5/HTTP 代理。
 
@@ -231,6 +232,7 @@ setx ANTIGRAVITY_HOME "%LOCALAPPDATA%\Programs\Antigravity"
 | 🌐 **FakeIP 系统** | 拦截 DNS 解析，分配虚拟 IP 并建立映射 | FakeIP System | Intercepts DNS, allocates virtual IPs |
 | 🔍 **自动探测** | 自动识别 Clash/V2Ray 等常见代理端口 | Auto Detect | Auto-detects common proxy ports |
 | 🔄 **故障自愈** | 代理端口变更时自动重新探测并重连 | Auto Healing | Auto re-detects port on connection failure |
+| ☕ **Java Agent** | 为 JVM 应用 (PyCharm/IntelliJ) 提供稳定代理 | Java Agent | Provides stable proxy for JVM Apps |
 | 👶 **子进程注入** | 自动将 DLL 注入到子进程 | Child Injection | Auto-injects DLL into child processes |
 | ⏱️ **超时控制** | 防止目标程序因网络问题卡死 | Timeout Control | Prevents hanging on network issues |
 | 🔄 **Fail-Safe** | 配置加载失败时自动直连 | Fail-Safe | Falls back to direct connection on error |
@@ -309,6 +311,38 @@ setx ANTIGRAVITY_HOME "%LOCALAPPDATA%\Programs\Antigravity"
 
 ---
 
+## ☕ Java Agent 方案 (适用于 PyCharm/IntelliJ)
+
+> 对于 PyCharm/IntelliJ 等基于 JVM 的应用，DLL 注入方案存在兼容性问题。我们推荐使用更稳定、更优雅的 **Java Agent** 方案。
+
+### 原理
+通过 Java Agent 在 JVM 启动时设置一个全局的 `ProxySelector`，将所有 Java 程序的网络请求指向我们的代理。
+
+### 快速开始
+
+#### Step 1: 构建 Agent
+在项目根目录运行 Maven 命令：
+```bash
+mvn clean package
+```
+这会在 `target/` 目录下生成 `agent-1.0.0.jar`。
+
+#### Step 2: 部署 Agent
+1. 将 `target/agent-1.0.0.jar` 复制到 PyCharm 安装目录的 `bin` 文件夹下。
+2. 将 `config.json` 也复制到 `bin` 文件夹下。
+
+#### Step 3: 修改 VM Options
+1. 在 PyCharm 的 `bin` 目录中，找到并编辑 `pycharm64.exe.vmoptions` 文件。
+2. 在文件末尾添加一行：
+   ```
+   -javaagent:agent-1.0.0.jar
+   ```
+
+#### Step 4: 启动 PyCharm
+重启 PyCharm，Agent 会自动加载并接管网络代理。
+
+---
+
 ## 🛠️ 编译构建 / Build
 
 ### 环境要求 / Prerequisites
@@ -320,6 +354,7 @@ setx ANTIGRAVITY_HOME "%LOCALAPPDATA%\Programs\Antigravity"
 | **Visual Studio 2022** | 2022 或更高 | C/C++ 编译器 | [下载](https://visualstudio.microsoft.com/) |
 | **CMake** | >= 3.0 | 构建系统 | [下载](https://cmake.org/download/) |
 | **PowerShell** | 5.0+ | 编译脚本 | Windows 自带 |
+| **Maven** | 3.6+ | Java Agent 构建 | [下载](https://maven.apache.org/download.cgi) |
 
 > 💡 **提示**: 安装 Visual Studio 时，请确保勾选 **"使用 C++ 的桌面开发"** 工作负载。
 
@@ -509,7 +544,7 @@ target_link_libraries(winmm PRIVATE ws2_32)
 
 - **PyCharm / IntelliJ IDEA 等 JetBrains 全家桶**:
   - **原因**: 此类基于 JVM 的应用，其 JIT 编译器与 MinHook 的 Inline Hook 机制存在底层冲突，会导致进程崩溃。
-  - **替代方案**: 请使用 IDE 内置的代理设置 (`Settings` -> `Appearance & Behavior` -> `System Settings` -> `HTTP Proxy`)。
+  - **替代方案**: 请使用本项目提供的 **Java Agent** 方案，或使用 IDE 内置的代理设置 (`Settings` -> `Appearance & Behavior` -> `System Settings` -> `HTTP Proxy`)。
 
 ### 验证是否生效 / Verification
 
@@ -636,6 +671,7 @@ C:\Users\你的用户名\AppData\Local\Programs\Microsoft VS Code\
 | **FakeIP** | `src/network/FakeIP.hpp` | 虚拟 IP 分配逻辑 |
 | **DLL 劫持** | `src/proxy/VersionProxy.cpp` | winmm.dll 代理转发 |
 | **进程注入** | `src/injection/ProcessInjector.hpp` | 子进程注入逻辑 |
+| **Java Agent** | `src/main/java/com/antigravity/agent/ProxyAgent.java` | JVM 代理实现 |
 
 #### 如何添加新的 Hook？
 
