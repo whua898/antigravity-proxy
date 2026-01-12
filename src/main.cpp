@@ -31,7 +31,7 @@ void InitializationThread() {
     Core::Config::Instance().Load("config.json");
 
     // 安装 Hooks
-    Hooks::Install();
+    // Hooks::Install();
 
     Core::Logger::Info("Antigravity-Proxy 初始化完成 (Delayed 3000ms)");
 }
